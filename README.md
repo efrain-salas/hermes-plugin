@@ -13,19 +13,21 @@
 
 ## Instalación
 
-Instala el wheel en el mismo entorno Python que ejecuta Hermes:
+Instala y habilita el plugin directamente desde este repositorio:
 
 ```bash
-pip install './hermes-mobile[documents]'
-hermes plugins enable hermes-mobile
+hermes plugins install efrain-salas/hermes-plugin --enable
 hermes mobile provision
 hermes gateway restart
 ```
 
 `provision` es idempotente. Conserva settings existentes, habilita el plugin en los perfiles servidos,
 genera una `API_SERVER_KEY` distinta donde falte, crea las bases/directorios con permisos restrictivos y
-avisa si hace falta reiniciar. Hermes no concede instalación implícita: primero debe instalarse y
-habilitarse el plugin mediante su CLI.
+avisa si hace falta reiniciar. Para fijar una versión reproducible, añade `--ref <commit SHA>` a la orden
+de instalación.
+
+También puede instalarse como wheel en el mismo entorno Python que ejecuta Hermes con
+`pip install './hermes-mobile[documents]'`; el extra `documents` habilita extracción de PDF.
 
 Configuración mínima del perfil `default`:
 
