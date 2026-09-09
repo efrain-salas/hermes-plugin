@@ -1,0 +1,62 @@
+name: Hermes Mobile test pipeline
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install --disable-pip-version-check uv
+      - run: uv sync --all-extras --python ${{ matrix.python-version }}
+      - run: uv run pytest -q --cov=hermes_mobile --cov-report=term-missing
+
+  contract:
+    name: OpenAPI and generated TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: python -m pip install --disable-pip-version-check PyYAML
+      - run: python scripts/generate_contract.py --check
+      - run: npm ci
+      - run: npm run typecheck
+
+  real-hermes-docker:
+    name: Real multiplexed Hermes in Docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the real Hermes journey
+        run: docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from tests
+      - name: Preserve service logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.test.yml logs --no-color > hermes-docker.log
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: hermes-docker-logs
+          path: hermes-docker.log
+      - name: Remove the ephemeral test stack
+        if: always()
+        run: docker compose -f docker-compose.test.yml down -v --remove-orphans

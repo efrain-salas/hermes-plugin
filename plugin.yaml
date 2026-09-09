@@ -1,0 +1,56 @@
+manifest_version: 1
+api_version: 1
+name: hermes-mobile
+version: 1.0.0
+description: Secure profile-scoped mobile API, attachments, sync and push for Hermes Gateway.
+author: Hermes Mobile contributors
+kind: standalone
+license: MIT
+homepage: https://github.com/NousResearch/hermes-agent
+platforms:
+  - linux
+  - macos
+provides_tools:
+  - mobile_attachment_read
+hooks:
+  - on_session_end
+python_dependencies:
+  - aiohttp>=3.10,<4
+  - cryptography>=43,<47
+  - pydantic>=2.9,<3
+  - PyYAML>=6,<7
+config_schema:
+  public_base_url:
+    type: str
+    default: ""
+    description: Public HTTPS origin advertised to paired clients.
+  loopback_base_url:
+    type: str
+    default: http://127.0.0.1:8642
+    description: Internal Hermes API listener used by HermesFacade.
+  access_token_ttl_seconds:
+    type: int
+    default: 900
+  refresh_token_ttl_days:
+    type: int
+    default: 90
+  pairing_ttl_seconds:
+    type: int
+    default: 600
+  max_file_bytes:
+    type: int
+    default: 52428800
+  max_attachments_per_turn:
+    type: int
+    default: 10
+  push:
+    type: dict
+    default: {enabled: true, provider: expo, timeout_seconds: 10, max_attempts: 8}
+  files:
+    type: dict
+    default: {enabled: true, ocr_enabled: false}
+tags:
+  - mobile
+  - api
+  - expo
+  - self-hosted

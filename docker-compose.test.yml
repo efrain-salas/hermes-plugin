@@ -1,0 +1,66 @@
+services:
+  fake-llm:
+    <<: &test-image
+      build:
+        context: .
+        dockerfile: tests/docker/Dockerfile
+      image: hermes-mobile-test
+    entrypoint: ["/opt/hermes/.venv/bin/python", "/opt/test/fake_services.py", "llm"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8081/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  fake-expo:
+    <<: *test-image
+    entrypoint: ["/opt/hermes/.venv/bin/python", "/opt/test/fake_services.py", "expo"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8082/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  hermes:
+    <<: *test-image
+    entrypoint: ["/bin/bash", "/opt/test/start-hermes.sh"]
+    environment:
+      HERMES_HOME: /opt/data
+      API_SERVER_HOST: 0.0.0.0
+      API_SERVER_PORT: "8642"
+      GATEWAY_MULTIPLEX_PROFILES: "true"
+      HERMES_GATEWAY_NO_SUPERVISE: "1"
+    ports:
+      - "18642:8642"
+    stop_grace_period: 5s
+    volumes:
+      - hermes-test-data:/opt/data
+    depends_on:
+      fake-llm:
+        condition: service_healthy
+      fake-expo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8642/p/default/v1/mobile/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 10s
+
+  tests:
+    <<: *test-image
+    entrypoint: ["/bin/bash", "-lc"]
+    command: ["cd /workspace && /opt/hermes/.venv/bin/python -m pytest -q -p no:cacheprovider -m docker tests/docker/test_real_hermes.py"]
+    environment:
+      HERMES_MOBILE_TEST_URL: http://hermes:8642
+      HERMES_MOBILE_TEST_DATA: /hermes-data
+      HERMES_MOBILE_EXPO_URL: http://fake-expo:8082
+    volumes:
+      - .:/workspace:ro
+      - hermes-test-data:/hermes-data
+    depends_on:
+      hermes:
+        condition: service_healthy
+
+volumes:
+  hermes-test-data:

@@ -1,0 +1,514 @@
+from __future__ import annotations
+
+import asyncio
+import json
+
+from aiohttp import FormData
+from conftest import pair_client
+
+
+async def _conversation(client, headers, title="Trip"):
+    response = await client.post(
+        "/p/default/v1/mobile/conversations",
+        headers={**headers, "Idempotency-Key": f"create-{title}"},
+        json={"title": title, "model": None},
+    )
+    assert response.status == 201, await response.text()
+    return await response.json()
+
+
+async def test_system_auth_devices_refresh_and_logout(client, runtime, auth):
+    paired, headers = auth
+    health = await client.get("/p/default/v1/mobile/health")
+    assert health.status == 200
+    assert (await health.json()) == {
+        "status": "ok",
+        "service": "hermes-mobile",
+        "api_version": "1.0",
+    }
+
+    capabilities = await client.get(
+        "/p/default/v1/mobile/capabilities", headers=headers
+    )
+    assert capabilities.status == 200
+    assert (await capabilities.json())["streaming"] is True
+    bootstrap = await client.get("/p/default/v1/mobile/bootstrap", headers=headers)
+    assert bootstrap.status == 200 and bootstrap.headers["ETag"]
+    cached = await client.get(
+        "/p/default/v1/mobile/bootstrap",
+        headers={**headers, "If-None-Match": bootstrap.headers["ETag"]},
+    )
+    assert cached.status == 304
+    me = await client.get("/p/default/v1/mobile/me", headers=headers)
+    assert (await me.json())["device"]["id"] == paired["device_id"]
+
+    update = await client.post(
+        "/p/default/v1/mobile/devices",
+        headers=headers,
+        json={
+            "installation_id": "installation-0001",
+            "name": "Renamed",
+            "platform": "ios",
+            "push_provider": "expo",
+            "push_token": "ExponentPushToken[abcdefghijk]",
+            "notifications": {
+                "turn_completed": True,
+                "turn_failed": False,
+                "approval_required": True,
+            },
+        },
+    )
+    assert update.status == 200
+    assert (await update.json())["push_registered"] is True
+    devices = await client.get("/p/default/v1/mobile/devices", headers=headers)
+    body = await devices.json()
+    assert body["items"][0]["name"] == "Renamed"
+    assert "push_token" not in json.dumps(body)
+
+    refresh = await client.post(
+        "/p/default/v1/mobile/auth/refresh",
+        json={"refresh_token": paired["refresh_token"]},
+    )
+    assert refresh.status == 200
+    new_session = await refresh.json()
+    reuse = await client.post(
+        "/p/default/v1/mobile/auth/refresh",
+        json={"refresh_token": paired["refresh_token"]},
+    )
+    assert reuse.status == 401
+    new_headers = {"Authorization": f"Bearer {new_session['access_token']}"}
+    logout = await client.post("/p/default/v1/mobile/auth/logout", headers=new_headers)
+    assert logout.status == 204
+    assert (
+        await client.get("/p/default/v1/mobile/me", headers=new_headers)
+    ).status == 401
+
+
+async def test_conversation_full_lifecycle_and_idempotency(client, auth):
+    _, headers = auth
+    conversation = await _conversation(client, headers)
+    replay = await client.post(
+        "/p/default/v1/mobile/conversations",
+        headers={**headers, "Idempotency-Key": "create-Trip"},
+        json={"title": "Trip", "model": None},
+    )
+    assert replay.status == 201 and (await replay.json())["id"] == conversation["id"]
+    conflict = await client.post(
+        "/p/default/v1/mobile/conversations",
+        headers={**headers, "Idempotency-Key": "create-Trip"},
+        json={"title": "Different", "model": None},
+    )
+    assert conflict.status == 409
+
+    listing = await client.get(
+        "/p/default/v1/mobile/conversations?q=trip", headers=headers
+    )
+    assert (await listing.json())["items"][0]["id"] == conversation["id"]
+    detail = await client.get(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}", headers=headers
+    )
+    assert detail.status == 200
+    patched = await client.patch(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}",
+        headers=headers,
+        json={"title": "New title", "pinned": True, "model": "mock-model"},
+    )
+    assert (await patched.json())["pinned"] is True
+    messages = await client.get(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}/messages",
+        headers=headers,
+    )
+    assert (await messages.json())["items"] == []
+    read = await client.post(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}/read",
+        headers=headers,
+        json={"message_id": "msg_12345678"},
+    )
+    assert read.status == 204
+    forked = await client.post(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}/fork",
+        headers=headers,
+        json={"message_id": "msg_12345678", "title": "Branch"},
+    )
+    assert forked.status == 201
+    deleted = await client.delete(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}", headers=headers
+    )
+    assert deleted.status == 204
+    assert (
+        await client.get(
+            f"/p/default/v1/mobile/conversations/{conversation['id']}", headers=headers
+        )
+    ).status == 404
+
+
+async def test_attachment_run_sse_sync_models_and_toolsets(client, runtime, auth):
+    _, headers = auth
+    conversation = await _conversation(client, headers, "Attachment run")
+    form = FormData()
+    form.add_field("client_attachment_id", "local-attachment-1")
+    form.add_field("conversation_id", conversation["id"])
+    form.add_field(
+        "file",
+        b"revenue,amount\nQ1,42\n",
+        filename="report.csv",
+        content_type="text/csv",
+    )
+    uploaded = await client.post(
+        "/p/default/v1/mobile/attachments", headers=headers, data=form
+    )
+    assert uploaded.status == 202, await uploaded.text()
+    attachment = await uploaded.json()
+    for _ in range(50):
+        response = await client.get(
+            f"/p/default/v1/mobile/attachments/{attachment['id']}", headers=headers
+        )
+        attachment = await response.json()
+        if attachment["status"] == "ready":
+            break
+        await asyncio.sleep(0.02)
+    assert attachment["status"] == "ready"
+    listing = await client.get(
+        f"/p/default/v1/mobile/attachments?conversation_id={conversation['id']}&status=ready",
+        headers=headers,
+    )
+    assert len((await listing.json())["items"]) == 1
+    content = await client.get(
+        f"/p/default/v1/mobile/attachments/{attachment['id']}/content", headers=headers
+    )
+    assert content.status == 200 and b"Q1,42" in await content.read()
+
+    started = await client.post(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}/runs",
+        headers={**headers, "Idempotency-Key": "run-one"},
+        json={
+            "client_message_id": "client-message-one",
+            "input": [
+                {"type": "text", "text": "Analyze"},
+                {"type": "attachment", "attachment_id": attachment["id"]},
+            ],
+        },
+    )
+    assert started.status == 202, await started.text()
+    run = await started.json()
+    replayed = await client.post(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}/runs",
+        headers={**headers, "Idempotency-Key": "run-one"},
+        json={
+            "client_message_id": "client-message-one",
+            "input": [
+                {"type": "text", "text": "Analyze"},
+                {"type": "attachment", "attachment_id": attachment["id"]},
+            ],
+        },
+    )
+    assert replayed.headers["Idempotency-Replayed"] == "true"
+    assert (await replayed.json())["run_id"] == run["run_id"]
+    conflict = await client.post(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}/runs",
+        headers={**headers, "Idempotency-Key": "run-one"},
+        json={
+            "client_message_id": "different",
+            "input": [{"type": "text", "text": "Different"}],
+        },
+    )
+    assert conflict.status == 409
+    await asyncio.sleep(0.1)
+    status = await client.get(
+        f"/p/default/v1/mobile/runs/{run['run_id']}", headers=headers
+    )
+    assert (await status.json())["status"] == "completed"
+    stream = await client.get(
+        f"/p/default/v1/mobile/runs/{run['run_id']}/events", headers=headers
+    )
+    events = await stream.text()
+    assert "event: run.started" in events
+    assert "event: tool.started" in events
+    assert "event: subagent.started" in events
+    assert "event: reasoning.available" in events
+    assert "private chain" not in events
+    assert "event: run.completed" in events
+
+    models = await client.get("/p/default/v1/mobile/models", headers=headers)
+    assert (await models.json())["default"] == "mock-model"
+    toolsets = await client.get("/p/default/v1/mobile/toolsets", headers=headers)
+    assert (await toolsets.json())["items"][0]["id"] == "hermes_mobile"
+    sync = await client.get("/p/default/v1/mobile/sync?cursor=sync_0", headers=headers)
+    changes = (await sync.json())["changes"]
+    assert {change["type"] for change in changes} >= {
+        "conversation.created",
+        "attachment.updated",
+        "run.updated",
+    }
+
+
+async def test_profile_isolation_and_uniform_not_found(client, runtime, auth):
+    _, default_headers = auth
+    mujer = await pair_client(client, runtime, "mujer", "installation-mujer")
+    mujer_headers = {"Authorization": f"Bearer {mujer['access_token']}"}
+    default_conv = await _conversation(client, default_headers, "Private")
+    mismatch = await client.get("/p/mujer/v1/mobile/me", headers=default_headers)
+    assert (
+        mismatch.status == 403
+        and (await mismatch.json())["error"]["code"] == "profile_mismatch"
+    )
+    cross = await client.get(
+        f"/p/mujer/v1/mobile/conversations/{default_conv['id']}", headers=mujer_headers
+    )
+    assert cross.status == 404
+
+
+async def test_bad_upload_and_dependency_failure_do_not_break_health(
+    client, fake_facade, auth
+):
+    _, headers = auth
+    form = FormData()
+    form.add_field("client_attachment_id", "evil-1")
+    form.add_field(
+        "file", b"MZ" + b"x" * 32, filename="photo.png", content_type="image/png"
+    )
+    rejected = await client.post(
+        "/p/default/v1/mobile/attachments", headers=headers, data=form
+    )
+    assert rejected.status == 415
+    fake_facade.fail = True
+    failed = await client.get("/p/default/v1/mobile/capabilities", headers=headers)
+    assert failed.status == 500
+    text = await failed.text()
+    assert "API_SERVER_KEY" not in text and "should-never-leak" not in text
+    assert (await client.get("/p/default/v1/mobile/health")).status == 200
+
+
+async def test_remaining_device_and_validation_surface(client, runtime, auth):
+    paired, headers = auth
+    missing_auth = await client.get("/p/default/v1/mobile/me")
+    assert missing_auth.status == 401 and (await missing_auth.json())["error"][
+        "request_id"
+    ].startswith("req_")
+    invalid_json = await client.post(
+        "/p/default/v1/mobile/devices",
+        headers={**headers, "Content-Type": "application/json"},
+        data="{",
+    )
+    assert invalid_json.status == 400
+    patched = await client.patch(
+        f"/p/default/v1/mobile/devices/{paired['device_id']}",
+        headers=headers,
+        json={"name": "Patched", "locale": "ca-ES"},
+    )
+    assert patched.status == 200 and (await patched.json())["name"] == "Patched"
+    hidden = await client.patch(
+        "/p/default/v1/mobile/devices/dev_not_owned",
+        headers=headers,
+        json={"name": "x"},
+    )
+    assert hidden.status == 404
+    wrong_refresh = await client.post(
+        "/p/mujer/v1/mobile/auth/refresh",
+        json={"refresh_token": paired["refresh_token"]},
+    )
+    assert wrong_refresh.status == 403
+    bad_cursor = await client.get(
+        "/p/default/v1/mobile/conversations?cursor=%%%", headers=headers
+    )
+    assert bad_cursor.status == 400
+    bad_sync = await client.get(
+        "/p/default/v1/mobile/sync?cursor=sync_-1", headers=headers
+    )
+    assert (
+        bad_sync.status == 409
+        and (await bad_sync.json())["error"]["details"]["reset_cursor"] == "sync_0"
+    )
+
+    deleted = await client.delete(
+        f"/p/default/v1/mobile/devices/{paired['device_id']}", headers=headers
+    )
+    assert deleted.status == 204
+    assert (await client.get("/p/default/v1/mobile/me", headers=headers)).status == 401
+
+
+async def test_cancel_steer_approval_retry_and_sse_resume(
+    client, runtime, fake_facade, auth
+):
+    _, headers = auth
+    conversation = await _conversation(client, headers, "Control surface")
+    store = runtime.store("default")
+    native = "manual-running"
+    fake_facade.runs[("default", native)] = {"run_id": native, "status": "running"}
+    run = store.create_run(conversation["id"], native, "manual-message")
+    store.update_run(run["public_id"], "running")
+    first = store.append_event(run["public_id"], "run.started", {})
+
+    steered = await client.post(
+        f"/p/default/v1/mobile/runs/{run['public_id']}/steer",
+        headers=headers,
+        json={"instruction": "Prioriza la seguridad"},
+    )
+    assert steered.status == 202
+    approval_id = store.ensure_approval(run["public_id"], "native-approval")
+    store.update_run(run["public_id"], "waiting_for_approval")
+    approved = await client.post(
+        f"/p/default/v1/mobile/runs/{run['public_id']}/approvals/{approval_id}",
+        headers=headers,
+        json={"decision": "allow_once"},
+    )
+    assert approved.status == 200 and (await approved.json())["status"] == "resolved"
+    duplicate = await client.post(
+        f"/p/default/v1/mobile/runs/{run['public_id']}/approvals/{approval_id}",
+        headers=headers,
+        json={"decision": "deny"},
+    )
+    assert duplicate.status == 409
+
+    cancelled = await client.post(
+        f"/p/default/v1/mobile/runs/{run['public_id']}/cancel", headers=headers
+    )
+    assert cancelled.status == 200 and (await cancelled.json())["status"] == "cancelled"
+    retry_missing_key = await client.post(
+        f"/p/default/v1/mobile/runs/{run['public_id']}/retry", headers=headers
+    )
+    assert retry_missing_key.status == 400
+    retried = await client.post(
+        f"/p/default/v1/mobile/runs/{run['public_id']}/retry",
+        headers={**headers, "Idempotency-Key": "retry-one"},
+    )
+    assert retried.status == 202
+    retry_replay = await client.post(
+        f"/p/default/v1/mobile/runs/{run['public_id']}/retry",
+        headers={**headers, "Idempotency-Key": "retry-one"},
+    )
+    assert retry_replay.headers["Idempotency-Replayed"] == "true"
+    assert (await retry_replay.json())["run_id"] == (await retried.json())["run_id"]
+    await asyncio.sleep(0.1)
+    retry_body = await retried.json()
+    assert (
+        await client.get(
+            f"/p/default/v1/mobile/runs/{retry_body['run_id']}", headers=headers
+        )
+    ).status == 200
+
+    resumed = await client.get(
+        f"/p/default/v1/mobile/runs/{run['public_id']}/events",
+        headers={**headers, "Last-Event-ID": "evt_unknown"},
+    )
+    text = await resumed.text()
+    assert "event: stream.reset" in text and first["event_id"] in text
+    finished_steer = await client.post(
+        f"/p/default/v1/mobile/runs/{run['public_id']}/steer",
+        headers=headers,
+        json={"instruction": "too late"},
+    )
+    assert finished_steer.status == 409
+
+
+async def test_attachment_retry_delete_and_active_run_guard(
+    client, runtime, fake_facade, auth
+):
+    _, headers = auth
+    conversation = await _conversation(client, headers, "Attachment controls")
+    store = runtime.store("default")
+    original = store.files_root / "originals" / "manual" / "file"
+    original.parent.mkdir(parents=True)
+    original.write_text("safe content")
+    attachment = store.create_attachment(
+        {
+            "conversation_id": conversation["id"],
+            "client_attachment_id": "manual-retry",
+            "filename": "manual.txt",
+            "safe_filename": "manual.txt",
+            "mime_type": "text/plain",
+            "size": original.stat().st_size,
+            "sha256": "abc",
+            "storage_path": str(original),
+        }
+    )
+    store.update_attachment(
+        attachment["public_id"], "failed", error_code="extraction_failed"
+    )
+    retried = await client.post(
+        f"/p/default/v1/mobile/attachments/{attachment['public_id']}/retry",
+        headers=headers,
+    )
+    assert retried.status == 202
+    for _ in range(50):
+        current = await client.get(
+            f"/p/default/v1/mobile/attachments/{attachment['public_id']}",
+            headers=headers,
+        )
+        if (await current.json())["status"] == "ready":
+            break
+        await asyncio.sleep(0.02)
+    retry_again = await client.post(
+        f"/p/default/v1/mobile/attachments/{attachment['public_id']}/retry",
+        headers=headers,
+    )
+    assert retry_again.status == 409
+
+    native = "attachment-run"
+    fake_facade.runs[("default", native)] = {"run_id": native, "status": "running"}
+    active = store.create_run(conversation["id"], native, None)
+    store.update_run(active["public_id"], "running")
+    guarded = await client.delete(
+        f"/p/default/v1/mobile/attachments/{attachment['public_id']}", headers=headers
+    )
+    assert guarded.status == 409
+    store.update_run(active["public_id"], "completed")
+    deleted = await client.delete(
+        f"/p/default/v1/mobile/attachments/{attachment['public_id']}", headers=headers
+    )
+    assert deleted.status == 204
+    assert (
+        await client.get(
+            f"/p/default/v1/mobile/attachments/{attachment['public_id']}",
+            headers=headers,
+        )
+    ).status == 404
+
+
+async def test_messages_mapping_filters_and_model_error(client, fake_facade, auth):
+    _, headers = auth
+    first = await _conversation(client, headers, "Alpha")
+    await _conversation(client, headers, "Beta")
+    fake_facade.messages[
+        (
+            "default",
+            fake_facade.sessions["default"][
+                next(
+                    key
+                    for key, value in fake_facade.sessions["default"].items()
+                    if value["title"] == "Alpha"
+                )
+            ]["id"],
+        )
+    ] = [
+        {
+            "id": "native-message",
+            "role": "assistant",
+            "content": "Answer",
+            "timestamp": 1_788_948_001.0,
+            "token_count": 4,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "function": {"name": "calculator", "arguments": {"x": 1}},
+                }
+            ],
+        }
+    ]
+    messages = await client.get(
+        f"/p/default/v1/mobile/conversations/{first['id']}/messages", headers=headers
+    )
+    body = await messages.json()
+    assert body["items"][0]["content"][0]["text"] == "Answer"
+    assert body["items"][0]["content"][1]["type"] == "tool_call"
+    invalid_model = await client.patch(
+        f"/p/default/v1/mobile/conversations/{first['id']}",
+        headers=headers,
+        json={"model": "missing-model"},
+    )
+    assert invalid_model.status == 400
+    page = await client.get(
+        "/p/default/v1/mobile/conversations?limit=1", headers=headers
+    )
+    page_body = await page.json()
+    assert page_body["has_more"] is True and page_body["next_cursor"]

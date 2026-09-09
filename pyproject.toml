@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hermes-mobile"
+version = "1.0.0"
+description = "Secure, profile-scoped mobile API for Hermes Gateway"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "MIT" }
+authors = [{ name = "Hermes Mobile contributors" }]
+dependencies = [
+  "aiohttp>=3.10,<4",
+  "cryptography>=43,<47",
+  "pydantic>=2.9,<3",
+  "PyYAML>=6,<7",
+]
+
+[project.optional-dependencies]
+documents = ["pypdf>=5,<7"]
+test = [
+  "pytest>=8.3,<10",
+  "pytest-asyncio>=0.24,<2",
+  "pytest-cov>=6,<8",
+  "httpx>=0.27,<1",
+  "jsonschema>=4.23,<5",
+]
+
+[project.entry-points."hermes_agent.plugins"]
+hermes-mobile = "hermes_mobile.plugin"
+
+[tool.hatch.build]
+exclude = [
+  "/.coverage",
+  "/node_modules",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["hermes_mobile"]
+force-include = { "plugin.yaml" = "hermes_mobile/plugin.yaml" }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers -m 'not docker'"
+markers = [
+  "docker: requires the Docker Hermes test stack",
+  "contract: validates the public mobile protocol",
+  "security: adversarial security behavior",
+  "resilience: dependency failure behavior",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["hermes_mobile"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true

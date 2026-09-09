@@ -1,0 +1,1014 @@
+openapi: 3.1.0
+info:
+  title: Hermes Mobile API
+  version: 1.0.0
+  description: Stable profile-scoped mobile contract.
+servers:
+- url: https://hermes.example.com
+paths:
+  /p/{profile}/v1/mobile/health:
+    get:
+      operationId: health
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+  /p/{profile}/v1/mobile/capabilities:
+    get:
+      operationId: getCapabilities
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/bootstrap:
+    get:
+      operationId: bootstrap
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/auth/pair:
+    post:
+      operationId: pair
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+  /p/{profile}/v1/mobile/auth/refresh:
+    post:
+      operationId: refresh
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+  /p/{profile}/v1/mobile/auth/logout:
+    post:
+      operationId: logout
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/me:
+    get:
+      operationId: me
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/devices:
+    get:
+      operationId: listDevices
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+    post:
+      operationId: upsertDevice
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+  /p/{profile}/v1/mobile/devices/{device_id}:
+    patch:
+      operationId: patchDevice
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: device_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+    delete:
+      operationId: deleteDevice
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: device_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/conversations:
+    get:
+      operationId: listConversations
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+    post:
+      operationId: createConversation
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+  /p/{profile}/v1/mobile/conversations/{conversation_id}:
+    get:
+      operationId: getConversation
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: conversation_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+    patch:
+      operationId: patchConversation
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: conversation_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+    delete:
+      operationId: deleteConversation
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: conversation_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/conversations/{conversation_id}/fork:
+    post:
+      operationId: forkConversation
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: conversation_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+  /p/{profile}/v1/mobile/conversations/{conversation_id}/read:
+    post:
+      operationId: readConversation
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: conversation_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+  /p/{profile}/v1/mobile/conversations/{conversation_id}/messages:
+    get:
+      operationId: listMessages
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: conversation_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/conversations/{conversation_id}/runs:
+    post:
+      operationId: createRun
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: conversation_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+  /p/{profile}/v1/mobile/runs/{run_id}:
+    get:
+      operationId: getRun
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/runs/{run_id}/events:
+    get:
+      operationId: streamRunEvents
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/runs/{run_id}/cancel:
+    post:
+      operationId: cancelRun
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/runs/{run_id}/steer:
+    post:
+      operationId: steerRun
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+  /p/{profile}/v1/mobile/runs/{run_id}/approvals/{approval_id}:
+    post:
+      operationId: answerApproval
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: approval_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+  /p/{profile}/v1/mobile/runs/{run_id}/retry:
+    post:
+      operationId: retryRun
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/attachments:
+    get:
+      operationId: listAttachments
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+    post:
+      operationId: uploadAttachment
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: true
+  /p/{profile}/v1/mobile/attachments/{attachment_id}:
+    get:
+      operationId: getAttachment
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: attachment_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+    delete:
+      operationId: deleteAttachment
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: attachment_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/attachments/{attachment_id}/content:
+    get:
+      operationId: getAttachmentContent
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: attachment_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/attachments/{attachment_id}/retry:
+    post:
+      operationId: retryAttachment
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: attachment_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/models:
+    get:
+      operationId: listModels
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/toolsets:
+    get:
+      operationId: listToolsets
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/sync:
+    get:
+      operationId: sync
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+components:
+  securitySchemes:
+    mobileBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  responses:
+    MobileError:
+      description: Typed mobile error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required:
+      - error
+      properties:
+        error:
+          type: object
+          required:
+          - code
+          - message
+          - request_id
+          - retryable
+          - details
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            request_id:
+              type: string
+              pattern: ^req_
+            retryable:
+              type: boolean
+            details:
+              type: object
+    RunEvent:
+      type: object
+      required:
+      - event_id
+      - sequence
+      - type
+      - run_id
+      - conversation_id
+      - created_at
+      - data
+      properties:
+        event_id:
+          type: string
+        sequence:
+          type: integer
+        type:
+          type: string
+        run_id:
+          type: string
+        conversation_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        data:
+          type: object
