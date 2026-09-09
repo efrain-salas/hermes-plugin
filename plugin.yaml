@@ -12,7 +12,7 @@ platforms:
   - macos
 provides_tools:
   - mobile_attachment_read
-hooks:
+provides_hooks:
   - on_session_end
 python_dependencies:
   - aiohttp>=3.10,<4
