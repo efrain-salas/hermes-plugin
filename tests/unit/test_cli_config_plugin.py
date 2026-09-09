@@ -109,7 +109,7 @@ def test_cli_provision_pair_devices_revoke_and_doctor(tmp_path, monkeypatch, cap
     assert cli.doctor("default") == 0
     assert json.loads(capsys.readouterr().out)["status"] == "ok"
 
-    assert cli.pair("default", "Primary") == 0
+    assert cli.pair("default", "Primary", output="json") == 0
     pairing = json.loads(capsys.readouterr().out)
     assert pairing["pairing_url"].startswith("hermes://pair?")
     assert pairing["base_url"] == "https://hermes.example.com"
@@ -132,7 +132,7 @@ def test_cli_provision_pair_devices_revoke_and_doctor(tmp_path, monkeypatch, cap
     assert cli.revoke(paired["device"]["id"], "default") == 0
     assert "Revocado" in capsys.readouterr().out
     assert cli.revoke("dev_missing", "default") == 2
-    assert cli.pair("missing", None) == 2
+    assert cli.pair("missing", None, output="json") == 2
 
 
 def test_cli_parser_dispatch_and_redaction(tmp_path, monkeypatch):
@@ -151,6 +151,45 @@ def test_cli_parser_dispatch_and_redaction(tmp_path, monkeypatch):
     )
     assert "abc" not in cleaned and "secret" not in cleaned and "server" not in cleaned
     assert cleaned.count("[REDACTED]") == 4
+
+
+def test_cli_pair_prints_qr_and_supports_explicit_output(
+    tmp_path, monkeypatch, capsys
+):
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "plugins": {
+                    "entries": {
+                        "hermes-mobile": {
+                            "settings": {
+                                "public_base_url": "https://april.efrapin.us"
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(cli, "_default_home", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_profile_home", lambda _name: tmp_path)
+
+    assert cli.pair("default", "Phone", output="qr") == 0
+    qr_output = capsys.readouterr().out
+    assert "Escanea este QR con Hermes Mobile" in qr_output
+    assert "█" in qr_output
+    assert "pairing_token" not in qr_output
+    assert "hermes://pair?" not in qr_output
+
+    assert cli.pair("default", "Phone", output="json") == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["base_url"] == "https://april.efrapin.us"
+
+    parser = argparse.ArgumentParser()
+    cli.setup_parser(parser)
+    assert parser.parse_args(["pair"]).pair_output == "qr"
+    assert parser.parse_args(["pair", "--qr"]).pair_output == "qr"
+    assert parser.parse_args(["pair", "--json"]).pair_output == "json"
 
 
 def test_provision_requires_multiplex(tmp_path, monkeypatch, capsys):

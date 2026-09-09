@@ -41,7 +41,9 @@ printf 'n\n' | "$HERMES" -p mujer plugins enable hermes-mobile
 "$HERMES" mobile provision
 "$HERMES" mobile doctor --profile default > /opt/data/test-doctor-default.json
 "$HERMES" mobile doctor --profile mujer > /opt/data/test-doctor-mujer.json
-"$HERMES" mobile pair --profile default --display-name Default > /opt/data/test-pair-default.json
-"$HERMES" mobile pair --profile mujer --display-name Mujer > /opt/data/test-pair-mujer.json
+"$HERMES" mobile pair --profile default --display-name Default --json \
+  > /opt/data/test-pair-default.json
+"$HERMES" mobile pair --profile mujer --display-name Mujer --json \
+  > /opt/data/test-pair-mujer.json
 
 chown -R 10000:10000 /opt/data

@@ -51,12 +51,14 @@ Hermes y debe estar desactivado salvo una necesidad explícita.
 ```bash
 hermes mobile doctor --profile default
 hermes mobile pair --profile default --display-name Efraín
+hermes mobile pair --profile default --json
 hermes mobile devices --profile default
 hermes mobile revoke-device dev_xxx --profile default
 ```
 
-El pairing imprime un secreto de un solo uso y una URI apta para QR. Expira a los diez minutos por
-defecto. Trátalo como una credencial temporal.
+`pair` dibuja directamente un QR escaneable. Para automatizaciones, `--json` emite el token y la URI
+en formato estructurado; `--qr` permite documentar explícitamente el formato interactivo. El secreto es
+de un solo uso y expira a los diez minutos por defecto. Trátalo como una credencial temporal.
 
 Cuando `public_base_url` está configurada, la URI incluye también el host y la app puede completar el
 emparejamiento escaneando el QR sin pedir al usuario que copie una dirección. Los clientes antiguos

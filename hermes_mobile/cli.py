@@ -4,10 +4,12 @@ import json
 import os
 import secrets
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlparse
 
+import qrcode
 import yaml
 
 from .persistence.repositories import ControlStore, ProfileStore
@@ -26,6 +28,22 @@ def setup_parser(parser: Any) -> None:
     pair = commands.add_parser("pair", help="Create a one-use mobile pairing token")
     pair.add_argument("--profile")
     pair.add_argument("--display-name")
+    pair_output = pair.add_mutually_exclusive_group()
+    pair_output.add_argument(
+        "--qr",
+        dest="pair_output",
+        action="store_const",
+        const="qr",
+        help="Force a scannable terminal QR code",
+    )
+    pair_output.add_argument(
+        "--json",
+        dest="pair_output",
+        action="store_const",
+        const="json",
+        help="Force machine-readable JSON output",
+    )
+    pair.set_defaults(pair_output="qr")
     devices = commands.add_parser("devices", help="List paired devices")
     devices.add_argument("--profile")
     revoke = commands.add_parser("revoke-device", help="Revoke a paired mobile device")
@@ -272,7 +290,22 @@ def doctor(profile: str) -> int:
     return 0 if all(checks.values()) else 1
 
 
-def pair(profile: str, display_name: str | None) -> int:
+def _print_pairing_qr(pairing_url: str, profile: str, expires_at: str) -> None:
+    qr = qrcode.QRCode(
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        border=4,
+    )
+    qr.add_data(pairing_url)
+    qr.make(fit=True)
+    print(f"Escanea este QR con Hermes Mobile (perfil: {profile}):\n")
+    qr.print_ascii(out=sys.stdout, tty=sys.stdout.isatty())
+    print(f"\nCaduca: {expires_at}")
+    print("El código es de un solo uso. Usa --json para obtener la URI.")
+
+
+def pair(
+    profile: str, display_name: str | None, output: str = "qr"
+) -> int:
     root = _default_home()
     home = _profile_home(profile)
     if not home.is_dir():
@@ -295,18 +328,18 @@ def pair(profile: str, display_name: str | None) -> int:
     pairing_params = {"profile": profile, "token": result["token"]}
     if public_base_url:
         pairing_params["base_url"] = public_base_url
-    print(
-        json.dumps(
-            {
-                "profile": profile,
-                "pairing_token": result["token"],
-                "expires_at": result["expires_at"],
-                "base_url": public_base_url or None,
-                "pairing_url": f"hermes://pair?{urlencode(pairing_params)}",
-            },
-            indent=2,
-        )
-    )
+    pairing_url = f"hermes://pair?{urlencode(pairing_params)}"
+    payload = {
+        "profile": profile,
+        "pairing_token": result["token"],
+        "expires_at": result["expires_at"],
+        "base_url": public_base_url or None,
+        "pairing_url": pairing_url,
+    }
+    if output == "qr":
+        _print_pairing_qr(pairing_url, profile, result["expires_at"])
+    else:
+        print(json.dumps(payload, indent=2))
     return 0
 
 
@@ -362,7 +395,9 @@ def command(args: Any) -> int:
     if args.mobile_command == "doctor":
         return doctor(_selected_profile(args.profile))
     if args.mobile_command == "pair":
-        return pair(_selected_profile(args.profile), args.display_name)
+        return pair(
+            _selected_profile(args.profile), args.display_name, args.pair_output
+        )
     if args.mobile_command == "devices":
         return devices(_selected_profile(args.profile))
     if args.mobile_command == "revoke-device":

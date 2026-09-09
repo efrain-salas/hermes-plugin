@@ -1,7 +1,7 @@
 manifest_version: 1
 api_version: 1
 name: hermes-mobile
-version: 1.0.0
+version: 1.1.0
 description: Secure profile-scoped mobile API, attachments, sync and push for Hermes Gateway.
 author: Hermes Mobile contributors
 kind: standalone
@@ -19,6 +19,7 @@ python_dependencies:
   - cryptography>=43,<51
   - pydantic>=2.9,<3
   - PyYAML>=6,<7
+  - qrcode>=8,<9
 config_schema:
   public_base_url:
     type: str
