@@ -21,6 +21,9 @@ from .security.tokens import SecretBox, TokenManager
 
 logger = logging.getLogger("hermes_mobile")
 
+NOTIFICATION_EXCERPT_MAX_CHARS = 240
+NOTIFICATION_CAPTURE_MAX_CHARS = 4096
+
 SCHEDULED_TASK_INSTRUCTIONS = """Hermes Mobile tiene un hub para todas las tareas programadas.
 Cuando uses cronjob para crear o actualizar una tarea, usa deliver='local' salvo que el usuario
 pida explícitamente otro destino externo. Nunca uses Telegram ni origin como destino implícito.
@@ -261,12 +264,25 @@ class MobileRuntime:
         self, profile: str, public_run_id: str, hermes_run_id: str
     ) -> None:
         store = self.store(profile)
+        response_text = ""
         try:
             async for source in self.facade.stream_run_events(profile, hermes_run_id):
                 mapped = map_event(source)
                 if not mapped:
                     continue
                 event_type, data = mapped
+                if event_type == "message.delta":
+                    remaining = NOTIFICATION_CAPTURE_MAX_CHARS - len(response_text)
+                    if remaining > 0:
+                        response_text += self._content_text(
+                            data.get("delta") or data.get("text")
+                        )[:remaining]
+                elif event_type == "message.completed":
+                    completed_text = self._content_text(
+                        data.get("content") or data.get("text")
+                    )
+                    if completed_text:
+                        response_text = completed_text[:NOTIFICATION_CAPTURE_MAX_CHARS]
                 current = await asyncio.to_thread(store.run, public_run_id)
                 if (
                     current
@@ -307,7 +323,12 @@ class MobileRuntime:
                         error_code="agent_failed" if status == "failed" else None,
                     )
                     if status != "cancelled":
-                        await self._notify(profile, public_run_id, status)
+                        await self._notify(
+                            profile,
+                            public_run_id,
+                            status,
+                            response_text=response_text or None,
+                        )
                     await self.reconcile_scheduled_tasks(profile)
                 elif event_type == "approval.requested":
                     await asyncio.to_thread(
@@ -329,8 +350,82 @@ class MobileRuntime:
                 exc_info=False,
             )
 
+    @classmethod
+    def _content_text(cls, content: object) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "\n".join(
+                text
+                for item in content
+                if (text := cls._content_text(item)).strip()
+            )
+        if isinstance(content, dict):
+            for key in ("text", "content", "value"):
+                text = cls._content_text(content.get(key))
+                if text.strip():
+                    return text
+        return ""
+
+    @classmethod
+    def _notification_excerpt(cls, content: object) -> str:
+        text = " ".join(cls._content_text(content).split())
+        if len(text) <= NOTIFICATION_EXCERPT_MAX_CHARS:
+            return text
+        return text[: NOTIFICATION_EXCERPT_MAX_CHARS - 1].rstrip() + "…"
+
+    async def _completed_notification_copy(
+        self,
+        profile: str,
+        store: ProfileStore,
+        run: dict,
+        response_text: str | None,
+    ) -> tuple[str, str]:
+        conversation = await asyncio.to_thread(
+            store.conversation, run["conversation_id"]
+        )
+        title = str((conversation or {}).get("title_override") or "").strip()
+        session_id = str((conversation or {}).get("hermes_session_id") or "")
+
+        if not title and session_id:
+            try:
+                native = await self.facade.get_conversation(profile, session_id)
+                session = native.get("session") or native
+                title = str(session.get("title") or "").strip()
+            except Exception:
+                logger.warning(
+                    "Could not resolve conversation title for notification",
+                    exc_info=False,
+                )
+
+        body = self._notification_excerpt(response_text)
+        if not body and session_id:
+            try:
+                native_messages = await self.facade.get_messages(
+                    profile, session_id, limit=10, order="latest"
+                )
+                for message in native_messages.get("data", []):
+                    if message.get("role") != "assistant":
+                        continue
+                    body = self._notification_excerpt(message.get("content"))
+                    if body:
+                        break
+            except Exception:
+                logger.warning(
+                    "Could not resolve assistant response for notification",
+                    exc_info=False,
+                )
+
+        return title or "Conversación", body or "La respuesta está lista"
+
     async def _notify(
-        self, profile: str, run_id: str, status: str, approval_id: str | None = None
+        self,
+        profile: str,
+        run_id: str,
+        status: str,
+        approval_id: str | None = None,
+        *,
+        response_text: str | None = None,
     ) -> None:
         store = self.store(profile)
         run = await asyncio.to_thread(store.run, run_id)
@@ -347,6 +442,10 @@ class MobileRuntime:
             if status == "completed"
             else "El turno ha fallado"
         )
+        if status == "completed" and not approval_id:
+            title, body = await self._completed_notification_copy(
+                profile, store, run, response_text
+            )
         item, _created = await asyncio.to_thread(
             store.create_inbox_item,
             kind=kind,

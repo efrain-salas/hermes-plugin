@@ -17,6 +17,78 @@ async def _conversation(client, headers, title="Trip"):
     return await response.json()
 
 
+async def test_completed_run_notification_uses_conversation_and_response(
+    runtime, fake_facade, monkeypatch
+):
+    native = await fake_facade.create_conversation(
+        "default", {"title": "Plan del viaje"}
+    )
+    session_id = native["session"]["id"]
+    store = runtime.store("default")
+    conversation = store.ensure_conversation(session_id)
+    run = store.create_run(conversation["public_id"], "native-notification-run", None)
+    response = "Primera línea de la respuesta.\n\nSegunda línea con más contexto."
+
+    async def stream_run_events(_profile, _run_id):
+        yield {"event": "run.started"}
+        yield {"event": "assistant.completed", "content": response}
+        yield {"event": "run.completed"}
+
+    pushes = []
+
+    def capture_push(profile, kind, dedupe_key, payload):
+        pushes.append((profile, kind, dedupe_key, payload))
+        return 1
+
+    monkeypatch.setattr(fake_facade, "stream_run_events", stream_run_events)
+    monkeypatch.setattr(runtime.control, "enqueue_push", capture_push)
+
+    await runtime._mirror_run("default", run["public_id"], "native-notification-run")
+
+    item = store.inbox_item_by_source("run", run["public_id"])
+    expected_body = "Primera línea de la respuesta. Segunda línea con más contexto."
+    assert item and item["title"] == "Plan del viaje"
+    assert item["body"] == expected_body
+    assert pushes == [
+        (
+            "default",
+            "run.completed",
+            run["public_id"],
+            {
+                "title": "Plan del viaje",
+                "body": expected_body,
+                "data": {
+                    "type": "run.completed",
+                    "profile": "default",
+                    "conversation_id": conversation["public_id"],
+                    "run_id": run["public_id"],
+                    "inbox_item_id": item["public_id"],
+                },
+            },
+        )
+    ]
+
+    store.update_conversation(
+        conversation["public_id"], {"title_override": "Título local"}
+    )
+    fake_facade.messages[("default", session_id)] = [
+        {"role": "user", "content": "Pregunta"},
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Respuesta recuperada"}],
+        },
+    ]
+    fallback_title, fallback_body = await runtime._completed_notification_copy(
+        "default", store, run, None
+    )
+    assert (fallback_title, fallback_body) == (
+        "Título local",
+        "Respuesta recuperada",
+    )
+    excerpt = runtime._notification_excerpt("x" * 300)
+    assert len(excerpt) == 240 and excerpt.endswith("…")
+
+
 async def test_unified_inbox_can_open_conversation_and_reply(
     client, runtime, fake_facade, auth
 ):
