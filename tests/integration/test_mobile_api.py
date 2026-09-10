@@ -222,11 +222,16 @@ async def test_attachment_run_sse_sync_models_and_toolsets(
         },
     )
     assert conflict.status == 409
-    await asyncio.sleep(0.1)
-    status = await client.get(
-        f"/p/default/v1/mobile/runs/{run['run_id']}", headers=headers
-    )
-    assert (await status.json())["status"] == "completed"
+    terminal = None
+    for _ in range(100):
+        status = await client.get(
+            f"/p/default/v1/mobile/runs/{run['run_id']}", headers=headers
+        )
+        terminal = await status.json()
+        if terminal["status"] in {"completed", "failed", "cancelled"}:
+            break
+        await asyncio.sleep(0.02)
+    assert terminal and terminal["status"] == "completed"
     stream = await client.get(
         f"/p/default/v1/mobile/runs/{run['run_id']}/events", headers=headers
     )
