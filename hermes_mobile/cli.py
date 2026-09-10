@@ -12,6 +12,7 @@ from urllib.parse import urlencode, urlparse
 import qrcode
 import yaml
 
+from .persistence.migrations import CONTROL_SCHEMA_VERSION, PROFILE_SCHEMA_VERSION
 from .persistence.repositories import ControlStore, ProfileStore
 from .security.tokens import SecretBox, TokenManager
 
@@ -44,6 +45,11 @@ def setup_parser(parser: Any) -> None:
         help="Force machine-readable JSON output",
     )
     pair.set_defaults(pair_output="qr")
+    admin_init = commands.add_parser(
+        "admin-init", help="Create the one-use URL for registering an admin passkey"
+    )
+    admin_init.add_argument("--ttl-seconds", type=int, default=900)
+    admin_init.add_argument("--json", action="store_true")
     devices = commands.add_parser("devices", help="List paired devices")
     devices.add_argument("--profile")
     revoke = commands.add_parser("revoke-device", help="Revoke a paired mobile device")
@@ -56,7 +62,7 @@ def _default_home() -> Path:
         from hermes_constants import get_default_hermes_root
 
         return Path(get_default_hermes_root())
-    except Exception:
+    except Exception:  # noqa: BLE001 - compatibility across Hermes releases
         return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
 
 
@@ -73,7 +79,7 @@ def _selected_profile(explicit: str | None) -> str:
         from hermes_constants import get_hermes_home, profile_name_for_home
 
         return profile_name_for_home(get_hermes_home()) or "default"
-    except Exception:
+    except Exception:  # noqa: BLE001 - compatibility across Hermes releases
         home = Path(os.environ.get("HERMES_HOME", ""))
         return home.name if home.parent.name == "profiles" else "default"
 
@@ -103,6 +109,22 @@ def _read_yaml(path: Path) -> dict[str, Any]:
         return value if isinstance(value, dict) else {}
     except FileNotFoundError:
         return {}
+
+
+def _https_origin(value: Any) -> str | None:
+    parsed = urlparse(str(value or "").rstrip("/"))
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 def _atomic_yaml(path: Path, value: dict[str, Any]) -> None:
@@ -141,6 +163,11 @@ def _ensure_env(path: Path, *, enable_api_server: bool) -> bool:
 def provision() -> int:
     root = _default_home()
     default_cfg = _read_yaml(root / "config.yaml")
+    settings = (
+        (((default_cfg.get("plugins") or {}).get("entries") or {}).get("hermes-mobile"))
+        or {}
+    ).get("settings") or {}
+    public_origin = _https_origin(settings.get("public_base_url"))
     gateway = default_cfg.get("gateway") or {}
     multiplex = bool(
         gateway.get("multiplex_profiles") or default_cfg.get("multiplex_profiles")
@@ -155,7 +182,7 @@ def provision() -> int:
         from hermes_cli.profiles import profiles_to_serve
 
         profiles = profiles_to_serve(True, allowlist)
-    except Exception:
+    except Exception:  # noqa: BLE001 - fall back for older Hermes profile APIs
         names = (
             ["default"] + [p.name for p in (root / "profiles").iterdir() if p.is_dir()]
             if (root / "profiles").exists()
@@ -188,6 +215,23 @@ def provision() -> int:
             api_server = platforms.setdefault("api_server", {})
             if api_server.get("enabled") is not False:
                 api_server["enabled"] = False
+                changed = True
+        elif public_origin:
+            # Hermes rejects every browser POST carrying Origin unless that
+            # exact origin is allowlisted, including same-origin requests
+            # arriving through an HTTPS reverse proxy.
+            platforms = cfg.setdefault("platforms", {})
+            api_server = platforms.setdefault("api_server", {})
+            raw_origins = api_server.get("cors_origins") or []
+            origins = (
+                [item.strip() for item in raw_origins.split(",") if item.strip()]
+                if isinstance(raw_origins, str)
+                else [str(item) for item in raw_origins]
+                if isinstance(raw_origins, list)
+                else []
+            )
+            if "*" not in origins and public_origin not in origins:
+                api_server["cors_origins"] = [*origins, public_origin]
                 changed = True
         _atomic_yaml(cfg_path, cfg)
         # A multiplex gateway has exactly one HTTP listener. Named profiles
@@ -262,8 +306,10 @@ def doctor(profile: str) -> int:
         in ((profile_config.get("plugins") or {}).get("enabled") or []),
         "multiplex_gateway": bool(gateway.get("multiplex_profiles")),
         "profile_listener_scope": named_listener_safe,
-        "control_db": control_db.is_file() and _schema_ok(control_db, 1),
-        "profile_db": profile_db.is_file() and _schema_ok(profile_db, 1),
+        "control_db": control_db.is_file()
+        and _schema_ok(control_db, CONTROL_SCHEMA_VERSION),
+        "profile_db": profile_db.is_file()
+        and _schema_ok(profile_db, PROFILE_SCHEMA_VERSION),
         "hermes_api": "API_SERVER_KEY" in _env_names(home / ".env")
         and parsed_loopback.scheme in {"http", "https"}
         and bool(parsed_loopback.hostname),
@@ -303,9 +349,7 @@ def _print_pairing_qr(pairing_url: str, profile: str, expires_at: str) -> None:
     print("El código es de un solo uso. Usa --json para obtener la URI.")
 
 
-def pair(
-    profile: str, display_name: str | None, output: str = "qr"
-) -> int:
+def pair(profile: str, display_name: str | None, output: str = "qr") -> int:
     root = _default_home()
     home = _profile_home(profile)
     if not home.is_dir():
@@ -340,6 +384,42 @@ def pair(
         _print_pairing_qr(pairing_url, profile, result["expires_at"])
     else:
         print(json.dumps(payload, indent=2))
+    return 0
+
+
+def admin_init(ttl_seconds: int = 900, json_output: bool = False) -> int:
+    root = _default_home()
+    settings = (
+        (
+            (_read_yaml(root / "config.yaml").get("plugins") or {}).get("entries") or {}
+        ).get("hermes-mobile")
+        or {}
+    ).get("settings") or {}
+    public_base_url = str(settings.get("public_base_url") or "").rstrip("/")
+    origin = _https_origin(public_base_url)
+    if not origin:
+        print("ERROR: public_base_url debe ser un origen HTTPS sin ruta.")
+        return 2
+    store = ControlStore(root / "plugin-data" / "hermes-mobile" / "control.db")
+    store.initialize()
+    if store.admin_is_configured():
+        print("ERROR: la passkey administrativa ya está configurada.")
+        return 2
+    ttl_seconds = min(3600, max(300, ttl_seconds))
+    bootstrap = store.create_admin_bootstrap(ttl_seconds)
+    setup_url = f"{origin}/#{urlencode({'setup': bootstrap['token']})}"
+    payload = {
+        "setup_url": setup_url,
+        "bootstrap_token": bootstrap["token"],
+        "expires_at": bootstrap["expires_at"],
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2))
+    else:
+        print("Abre este enlace para registrar la passkey administrativa:")
+        print(setup_url)
+        print(f"Caduca: {bootstrap['expires_at']}")
+        print("El enlace es secreto y de un solo uso.")
     return 0
 
 
@@ -398,6 +478,8 @@ def command(args: Any) -> int:
         return pair(
             _selected_profile(args.profile), args.display_name, args.pair_output
         )
+    if args.mobile_command == "admin-init":
+        return admin_init(args.ttl_seconds, args.json)
     if args.mobile_command == "devices":
         return devices(_selected_profile(args.profile))
     if args.mobile_command == "revoke-device":

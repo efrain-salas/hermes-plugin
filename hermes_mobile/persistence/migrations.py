@@ -1,4 +1,4 @@
-CONTROL_SCHEMA_VERSION = 1
+CONTROL_SCHEMA_VERSION = 2
 PROFILE_SCHEMA_VERSION = 1
 
 CONTROL_SCHEMA = """
@@ -71,6 +71,53 @@ CREATE TABLE IF NOT EXISTS notification_outbox (
     delivered_at TEXT,
     UNIQUE(device_id, kind, dedupe_key)
 );
+CREATE TABLE IF NOT EXISTS admin_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS admin_bootstrap_tokens (
+    token_hash TEXT PRIMARY KEY,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS admin_webauthn_credentials (
+    credential_id BLOB PRIMARY KEY,
+    public_key BLOB NOT NULL,
+    sign_count INTEGER NOT NULL DEFAULT 0,
+    transports_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    last_used_at TEXT
+);
+CREATE TABLE IF NOT EXISTS admin_webauthn_challenges (
+    id TEXT PRIMARY KEY,
+    purpose TEXT NOT NULL,
+    challenge BLOB NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS admin_sessions (
+    token_hash TEXT PRIMARY KEY,
+    csrf_hash TEXT NOT NULL,
+    csrf_token TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    revoked_at TEXT
+);
+CREATE TABLE IF NOT EXISTS admin_audit (
+    id TEXT PRIMARY KEY,
+    event TEXT NOT NULL,
+    remote_hash TEXT,
+    details_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_admin_challenges_expiry
+    ON admin_webauthn_challenges(expires_at);
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_expiry ON admin_sessions(expires_at);
 """
 
 PROFILE_SCHEMA = """

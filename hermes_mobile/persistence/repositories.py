@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import secrets
@@ -28,7 +29,7 @@ def iso(value: datetime | None = None) -> str:
 
 
 def parse_time(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return datetime.fromisoformat(value)
 
 
 def secret_hash(value: str) -> str:
@@ -52,6 +53,10 @@ class InvalidRefresh(StoreError):
 
 
 class RefreshReuse(StoreError):
+    pass
+
+
+class InvalidAdminAuth(StoreError):
     pass
 
 
@@ -126,6 +131,283 @@ class ControlStore(SQLiteStore):
                 row,
             )
         return {**row, "token": token}
+
+    def admin_is_configured(self) -> bool:
+        with self.connect() as conn:
+            return bool(
+                conn.execute(
+                    "SELECT 1 FROM admin_webauthn_credentials LIMIT 1"
+                ).fetchone()
+            )
+
+    def admin_user_handle(self) -> bytes:
+        now = iso()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM admin_settings WHERE key='user_handle'"
+            ).fetchone()
+            if row:
+                return base64.urlsafe_b64decode(row["value"] + "==")
+            value = secrets.token_bytes(32)
+            encoded = base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+            conn.execute(
+                "INSERT INTO admin_settings(key,value,created_at,updated_at) "
+                "VALUES ('user_handle',?,?,?)",
+                (encoded, now, now),
+            )
+            return value
+
+    def create_admin_bootstrap(self, ttl_seconds: int = 900) -> dict[str, str]:
+        token = secrets.token_urlsafe(32)
+        now = utcnow()
+        expires_at = iso(now + timedelta(seconds=ttl_seconds))
+        with self.connect() as conn:
+            conn.execute("DELETE FROM admin_bootstrap_tokens")
+            conn.execute(
+                "INSERT INTO admin_bootstrap_tokens(token_hash,expires_at,created_at) "
+                "VALUES (?,?,?)",
+                (secret_hash(token), expires_at, iso(now)),
+            )
+        return {"token": token, "expires_at": expires_at}
+
+    def valid_admin_bootstrap(self, token: str) -> bool:
+        if not token:
+            return False
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT expires_at,consumed_at FROM admin_bootstrap_tokens "
+                "WHERE token_hash=?",
+                (secret_hash(token),),
+            ).fetchone()
+        return bool(
+            row and not row["consumed_at"] and parse_time(row["expires_at"]) > utcnow()
+        )
+
+    def consume_admin_bootstrap(self, token: str) -> None:
+        now = utcnow()
+
+        def _consume(conn: sqlite3.Connection) -> None:
+            row = conn.execute(
+                "SELECT expires_at,consumed_at FROM admin_bootstrap_tokens "
+                "WHERE token_hash=?",
+                (secret_hash(token),),
+            ).fetchone()
+            if not row or row["consumed_at"] or parse_time(row["expires_at"]) <= now:
+                raise InvalidAdminAuth("invalid_bootstrap")
+            conn.execute(
+                "UPDATE admin_bootstrap_tokens SET consumed_at=? WHERE token_hash=?",
+                (iso(now), secret_hash(token)),
+            )
+
+        self.transaction(_consume)
+
+    def create_admin_challenge(
+        self, purpose: str, ttl_seconds: int = 300
+    ) -> dict[str, Any]:
+        challenge = secrets.token_bytes(32)
+        now = utcnow()
+        row = {
+            "id": new_id("chal"),
+            "purpose": purpose,
+            "challenge": challenge,
+            "expires_at": iso(now + timedelta(seconds=ttl_seconds)),
+            "created_at": iso(now),
+        }
+        with self.connect() as conn:
+            conn.execute(
+                "DELETE FROM admin_webauthn_challenges "
+                "WHERE consumed_at IS NOT NULL OR expires_at<=?",
+                (iso(now),),
+            )
+            conn.execute(
+                "INSERT INTO admin_webauthn_challenges"
+                "(id,purpose,challenge,expires_at,created_at) "
+                "VALUES (:id,:purpose,:challenge,:expires_at,:created_at)",
+                row,
+            )
+        return row
+
+    def consume_admin_challenge(self, challenge_id: str, purpose: str) -> bytes:
+        now = utcnow()
+
+        def _consume(conn: sqlite3.Connection) -> bytes:
+            row = conn.execute(
+                "SELECT * FROM admin_webauthn_challenges WHERE id=? AND purpose=?",
+                (challenge_id, purpose),
+            ).fetchone()
+            if not row or row["consumed_at"] or parse_time(row["expires_at"]) <= now:
+                raise InvalidAdminAuth("invalid_challenge")
+            conn.execute(
+                "UPDATE admin_webauthn_challenges SET consumed_at=? WHERE id=?",
+                (iso(now), challenge_id),
+            )
+            return bytes(row["challenge"])
+
+        return self.transaction(_consume)
+
+    def admin_credentials(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            return [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM admin_webauthn_credentials ORDER BY created_at"
+                )
+            ]
+
+    def admin_credential(self, credential_id: bytes) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM admin_webauthn_credentials WHERE credential_id=?",
+                (credential_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def add_admin_credential(
+        self,
+        credential_id: bytes,
+        public_key: bytes,
+        sign_count: int,
+        transports: list[str],
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO admin_webauthn_credentials"
+                "(credential_id,public_key,sign_count,transports_json,created_at) "
+                "VALUES (?,?,?,?,?)",
+                (
+                    credential_id,
+                    public_key,
+                    sign_count,
+                    json_dump(transports),
+                    iso(),
+                ),
+            )
+
+    def register_admin_credential(
+        self,
+        bootstrap_token: str,
+        credential_id: bytes,
+        public_key: bytes,
+        sign_count: int,
+        transports: list[str],
+    ) -> None:
+        """Consume bootstrap and register exactly one initial passkey atomically."""
+        now = utcnow()
+
+        def _register(conn: sqlite3.Connection) -> None:
+            bootstrap = conn.execute(
+                "SELECT expires_at,consumed_at FROM admin_bootstrap_tokens "
+                "WHERE token_hash=?",
+                (secret_hash(bootstrap_token),),
+            ).fetchone()
+            configured = conn.execute(
+                "SELECT 1 FROM admin_webauthn_credentials LIMIT 1"
+            ).fetchone()
+            if (
+                not bootstrap
+                or bootstrap["consumed_at"]
+                or parse_time(bootstrap["expires_at"]) <= now
+            ):
+                raise InvalidAdminAuth("invalid_bootstrap")
+            if configured:
+                raise sqlite3.IntegrityError("admin passkey already configured")
+            conn.execute(
+                "INSERT INTO admin_webauthn_credentials"
+                "(credential_id,public_key,sign_count,transports_json,created_at) "
+                "VALUES (?,?,?,?,?)",
+                (
+                    credential_id,
+                    public_key,
+                    sign_count,
+                    json_dump(transports),
+                    iso(now),
+                ),
+            )
+            conn.execute(
+                "UPDATE admin_bootstrap_tokens SET consumed_at=? WHERE token_hash=?",
+                (iso(now), secret_hash(bootstrap_token)),
+            )
+
+        self.transaction(_register)
+
+    def update_admin_credential(self, credential_id: bytes, sign_count: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE admin_webauthn_credentials SET sign_count=?,last_used_at=? "
+                "WHERE credential_id=?",
+                (sign_count, iso(), credential_id),
+            )
+
+    def create_admin_session(self, ttl_seconds: int = 3600) -> dict[str, str]:
+        token = secrets.token_urlsafe(32)
+        csrf = secrets.token_urlsafe(32)
+        now = utcnow()
+        expires_at = iso(now + timedelta(seconds=ttl_seconds))
+        with self.connect() as conn:
+            conn.execute(
+                "DELETE FROM admin_sessions WHERE revoked_at IS NOT NULL OR expires_at<=?",
+                (iso(now),),
+            )
+            conn.execute(
+                "INSERT INTO admin_sessions"
+                "(token_hash,csrf_hash,csrf_token,expires_at,created_at,last_seen_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (
+                    secret_hash(token),
+                    secret_hash(csrf),
+                    csrf,
+                    expires_at,
+                    iso(now),
+                    iso(now),
+                ),
+            )
+        return {"token": token, "csrf": csrf, "expires_at": expires_at}
+
+    def admin_session(self, token: str) -> dict[str, Any] | None:
+        if not token:
+            return None
+        token_hash = secret_hash(token)
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM admin_sessions WHERE token_hash=?",
+                (token_hash,),
+            ).fetchone()
+            if (
+                not row
+                or row["revoked_at"]
+                or parse_time(row["expires_at"]) <= utcnow()
+            ):
+                return None
+            conn.execute(
+                "UPDATE admin_sessions SET last_seen_at=? WHERE token_hash=?",
+                (iso(), token_hash),
+            )
+            return dict(row)
+
+    def verify_admin_csrf(self, session: dict[str, Any], csrf: str) -> bool:
+        return bool(csrf) and secrets.compare_digest(
+            str(session["csrf_hash"]), secret_hash(csrf)
+        )
+
+    def revoke_admin_session(self, token: str) -> None:
+        if not token:
+            return
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE admin_sessions SET revoked_at=? WHERE token_hash=?",
+                (iso(), secret_hash(token)),
+            )
+
+    def audit_admin(
+        self, event: str, remote: str = "", details: dict[str, Any] | None = None
+    ) -> None:
+        remote_hash = secret_hash(remote) if remote else None
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO admin_audit(id,event,remote_hash,details_json,created_at) "
+                "VALUES (?,?,?,?,?)",
+                (new_id("audit"), event, remote_hash, json_dump(details or {}), iso()),
+            )
 
     def consume_pairing(
         self, profile: str, token: str, device: dict[str, Any], scopes: tuple[str, ...]

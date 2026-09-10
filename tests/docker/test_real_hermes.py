@@ -76,6 +76,30 @@ async def _wait_run(
 @pytest.mark.asyncio
 async def test_real_multiplexed_hermes_mobile_surface():
     async with httpx.AsyncClient(base_url=BASE, timeout=40) as client:
+        portal = await client.get("/")
+        assert portal.status_code == 200
+        assert "Hermes Mobile" in portal.text
+        assert "frame-ancestors 'none'" in portal.headers["Content-Security-Policy"]
+        assert portal.headers["Cache-Control"] == "no-store"
+        portal_status = await client.get("/v1/mobile/admin/status")
+        assert portal_status.json() == {
+            "configured": False,
+            "authenticated": False,
+        }
+        bootstrap = _fixture("test-admin-bootstrap.json")
+        assert bootstrap["setup_url"].startswith("https://hermes.test/#setup=")
+        registration = await client.post(
+            "/v1/mobile/admin/register/options",
+            headers={"Origin": "https://hermes.test"},
+            json={"bootstrap_token": bootstrap["bootstrap_token"]},
+        )
+        assert registration.status_code == 200, registration.text
+        registration_options = registration.json()["publicKey"]
+        assert registration_options["rp"]["id"] == "hermes.test"
+        assert (
+            registration_options["authenticatorSelection"]["residentKey"] == "required"
+        )
+
         assert (await client.get("/p/default/v1/mobile/health")).json()[
             "status"
         ] == "ok"

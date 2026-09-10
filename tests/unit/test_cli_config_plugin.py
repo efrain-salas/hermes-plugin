@@ -98,6 +98,10 @@ def test_cli_provision_pair_devices_revoke_and_doctor(tmp_path, monkeypatch, cap
     assert cli.provision() == 0
     assert "ya estaba al día" in capsys.readouterr().out
     assert "API_SERVER_ENABLED=true" in (tmp_path / ".env").read_text()
+    default_config = yaml.safe_load((tmp_path / "config.yaml").read_text())
+    assert default_config["platforms"]["api_server"]["cors_origins"] == [
+        "https://hermes.example.com"
+    ]
     assert (
         "API_SERVER_ENABLED"
         not in (tmp_path / "profiles" / "mujer" / ".env").read_text()
@@ -117,6 +121,14 @@ def test_cli_provision_pair_devices_revoke_and_doctor(tmp_path, monkeypatch, cap
     assert pairing_query["base_url"] == ["https://hermes.example.com"]
     assert pairing_query["profile"] == ["default"]
     assert pairing_query["token"] == [pairing["pairing_token"]]
+
+    assert cli.admin_init(json_output=True) == 0
+    admin_bootstrap = json.loads(capsys.readouterr().out)
+    setup_url = urlparse(admin_bootstrap["setup_url"])
+    assert setup_url.scheme == "https" and setup_url.netloc == "hermes.example.com"
+    assert not setup_url.query
+    assert parse_qs(setup_url.fragment)["setup"] == [admin_bootstrap["bootstrap_token"]]
+
     store = cli.ControlStore(tmp_path / "plugin-data" / "hermes-mobile" / "control.db")
     paired = store.consume_pairing(
         "default",
@@ -144,6 +156,9 @@ def test_cli_parser_dispatch_and_redaction(tmp_path, monkeypatch):
         cli, "_selected_profile", lambda explicit: explicit or "default"
     )
     assert cli.command(args) == 7
+    admin_args = parser.parse_args(["admin-init", "--ttl-seconds", "1200", "--json"])
+    monkeypatch.setattr(cli, "admin_init", lambda ttl, output: ttl if output else 0)
+    assert cli.command(admin_args) == 1200
     assert cli._selected_profile("mujer") == "mujer"
     cleaned = redact(
         "Authorization: Bearer abc\nrefresh_token=secret API_SERVER_KEY=server "
@@ -153,18 +168,14 @@ def test_cli_parser_dispatch_and_redaction(tmp_path, monkeypatch):
     assert cleaned.count("[REDACTED]") == 4
 
 
-def test_cli_pair_prints_qr_and_supports_explicit_output(
-    tmp_path, monkeypatch, capsys
-):
+def test_cli_pair_prints_qr_and_supports_explicit_output(tmp_path, monkeypatch, capsys):
     (tmp_path / "config.yaml").write_text(
         yaml.safe_dump(
             {
                 "plugins": {
                     "entries": {
                         "hermes-mobile": {
-                            "settings": {
-                                "public_base_url": "https://april.efrapin.us"
-                            }
+                            "settings": {"public_base_url": "https://april.efrapin.us"}
                         }
                     }
                 }
@@ -196,3 +207,24 @@ def test_provision_requires_multiplex(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_default_home", lambda: tmp_path)
     assert cli.provision() == 2
     assert "multiplex_profiles" in capsys.readouterr().out
+
+
+def test_admin_init_rejects_public_url_with_path(tmp_path, monkeypatch, capsys):
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "plugins": {
+                    "entries": {
+                        "hermes-mobile": {
+                            "settings": {
+                                "public_base_url": "https://hermes.example.com/api"
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(cli, "_default_home", lambda: tmp_path)
+    assert cli.admin_init() == 2
+    assert "origen HTTPS sin ruta" in capsys.readouterr().out

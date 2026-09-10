@@ -32,6 +32,7 @@ printf 'n\n' | "$HERMES" -p mujer plugins enable hermes-mobile
 "$HERMES" -p mujer config set API_SERVER_KEY mujer-api-server-key-00000000000000002
 "$HERMES" config set gateway.multiplex_profiles true
 "$HERMES" config set gateway.multiplex_profile_allowlist '["mujer"]'
+"$HERMES" config set plugins.entries.hermes-mobile.settings.public_base_url https://hermes.test
 "$HERMES" config set plugins.entries.hermes-mobile.settings.loopback_base_url http://127.0.0.1:8642
 "$HERMES" config set plugins.entries.hermes-mobile.settings.push.enabled true
 "$HERMES" config set plugins.entries.hermes-mobile.settings.push.endpoint http://fake-expo:8082/--/api/v2/push/send
@@ -41,6 +42,7 @@ printf 'n\n' | "$HERMES" -p mujer plugins enable hermes-mobile
 "$HERMES" mobile provision
 "$HERMES" mobile doctor --profile default > /opt/data/test-doctor-default.json
 "$HERMES" mobile doctor --profile mujer > /opt/data/test-doctor-mujer.json
+"$HERMES" mobile admin-init --json > /opt/data/test-admin-bootstrap.json
 "$HERMES" mobile pair --profile default --display-name Default --json \
   > /opt/data/test-pair-default.json
 "$HERMES" mobile pair --profile mujer --display-name Mujer --json \

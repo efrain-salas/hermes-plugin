@@ -1,7 +1,7 @@
 manifest_version: 1
 api_version: 1
 name: hermes-mobile
-version: 1.1.0
+version: 1.2.0
 description: Secure profile-scoped mobile API, attachments, sync and push for Hermes Gateway.
 author: Hermes Mobile contributors
 kind: standalone
@@ -20,11 +20,12 @@ python_dependencies:
   - pydantic>=2.9,<3
   - PyYAML>=6,<7
   - qrcode>=8,<9
+  - webauthn>=3,<4
 config_schema:
   public_base_url:
     type: str
     default: ""
-    description: Public HTTPS origin advertised to paired clients.
+    description: Public HTTPS origin, without a path, used by WebAuthn and paired clients.
   loopback_base_url:
     type: str
     default: http://127.0.0.1:8642

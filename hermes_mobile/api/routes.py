@@ -36,6 +36,7 @@ from ..persistence.repositories import (
 )
 from ..runtime import MobileRuntime
 from ..security.tokens import TokenError
+from .admin import AdminPortal
 from .errors import MobileError, error_response
 from .schemas import (
     ApprovalRequest,
@@ -61,6 +62,7 @@ class MobileAPI:
 
     def __init__(self, runtime: MobileRuntime):
         self.runtime = runtime
+        self.admin = AdminPortal(runtime)
         self._pair_attempts: dict[str, deque[float]] = defaultdict(deque)
         self._sse_counts: dict[str, int] = defaultdict(int)
 
@@ -70,6 +72,7 @@ class MobileAPI:
         app[WIRED_KEY] = True
         app.on_startup.append(self._startup)
         app.on_cleanup.append(self._cleanup)
+        self.admin.wire(app)
         routes: list[tuple[str, str, Handler, str | None]] = [
             ("GET", "/health", self.health, None),
             ("GET", "/capabilities", self.capabilities, "conversations:read"),

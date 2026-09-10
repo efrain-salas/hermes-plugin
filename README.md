@@ -1,8 +1,8 @@
 # Hermes Mobile
 
-`hermes-mobile` convierte un Hermes Gateway multiplexado en un backend móvil seguro. Expone únicamente
-`/p/{profile}/v1/mobile/*`; el teléfono usa access/refresh tokens del plugin y nunca recibe
-`API_SERVER_KEY`.
+`hermes-mobile` convierte un Hermes Gateway multiplexado en un backend móvil seguro. El teléfono usa
+access/refresh tokens del plugin y nunca recibe `API_SERVER_KEY`. La raíz `/` sirve un portal propio,
+independiente del dashboard de Hermes, para crear emparejamientos protegidos con passkey.
 
 ## Compatibilidad
 
@@ -43,8 +43,33 @@ plugins:
         public_base_url: https://hermes.example.com
 ```
 
-En producción publica el listener solo detrás de HTTPS. CORS permanece bajo el control del API Server de
-Hermes y debe estar desactivado salvo una necesidad explícita.
+En producción publica el listener solo detrás de HTTPS. `provision` añade el origen público exacto a
+`platforms.api_server.cors_origins`, porque el middleware de Hermes rechaza también los POST same-origin
+que llegan a través del proxy si no están allowlisted. No configura comodines ni otros orígenes.
+
+`public_base_url` debe ser el origen HTTPS exacto, sin ruta, query ni fragmento. Ese origen es también el
+RP de WebAuthn: cambiar su dominio invalida el uso de las passkeys registradas para el dominio anterior.
+
+## Portal de emparejamiento
+
+La passkey es global para esta instalación de Hermes; no pertenece a un perfil. Tras autenticarse en
+`https://hermes.example.com/`, el portal muestra de forma interactiva todos los perfiles servidos por el
+Gateway multiplexado. El propietario elige uno y genera un QR de un solo uso para ese perfil.
+
+Inicializa la primera passkey con un enlace temporal:
+
+```bash
+hermes mobile admin-init
+```
+
+El enlace caduca a los 15 minutos, solo puede consumirse una vez y lleva el secreto en el fragmento
+`#setup=...`, que el navegador no envía al proxy ni al servidor. Al abrirlo, registra una passkey con
+verificación de usuario (Face ID, Touch ID, huella, PIN o una llave compatible). A partir de entonces basta
+abrir `/`, autenticarse, elegir el perfil y pulsar **Generar QR de emparejamiento**.
+
+El portal usa una cookie de sesión `Secure`, `HttpOnly`, `SameSite=Strict`, comprobación de origen y token
+CSRF. Los endpoints de alta y login tienen limitación de intentos. `admin-init` deja de emitir enlaces en
+cuanto existe una passkey administrativa.
 
 ## Uso administrativo
 
@@ -88,7 +113,8 @@ docker compose -f docker-compose.test.yml up --build --abort-on-container-exit -
 ```
 
 La segunda orden levanta un Hermes real con perfiles `default` y `mujer`, un proveedor LLM compatible
-simulado y Expo Push simulado. Ejecuta pairing, aislamiento cruzado, conversaciones, run real, SSE,
+simulado y Expo Push simulado. Comprueba además el portal raíz y una ceremonia WebAuthn real hasta la
+entrega de opciones de registro. Ejecuta pairing, aislamiento cruzado, conversaciones, run real, SSE,
 adjuntos, sync, push, CLI y fallos de dependencias. El contenedor `tests` falla si el Gateway deja de estar
 vivo durante las pruebas de resiliencia.
 
