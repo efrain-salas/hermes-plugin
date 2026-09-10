@@ -65,6 +65,13 @@ def test_config_bounds_and_plugin_registration(tmp_path, monkeypatch):
     assert context.calls[1][2]["name"] == "mobile_attachment_read"
 
 
+def test_default_home_normalizes_a_named_profile(tmp_path, monkeypatch):
+    root = tmp_path / "hermes-root"
+    profile = root / "profiles" / "mujer"
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    assert cli._default_home() == root
+
+
 def test_cli_provision_pair_devices_revoke_and_doctor(tmp_path, monkeypatch, capsys):
     (tmp_path / "profiles" / "mujer").mkdir(parents=True)
     (tmp_path / "config.yaml").write_text(

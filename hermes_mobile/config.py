@@ -46,10 +46,12 @@ class MobileConfig:
             from hermes_constants import get_default_hermes_root
 
             default_home = Path(get_default_hermes_root())
-        except Exception:
+        except Exception:  # noqa: BLE001 - compatibility across Hermes releases
             import os
 
             default_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+        if default_home.parent.name == "profiles":
+            default_home = default_home.parent.parent
         push = ctx.get_config("push", {}) or {}
         files = ctx.get_config("files", {}) or {}
         if not isinstance(push, Mapping):

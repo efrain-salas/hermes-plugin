@@ -61,9 +61,12 @@ def _default_home() -> Path:
     try:
         from hermes_constants import get_default_hermes_root
 
-        return Path(get_default_hermes_root())
+        home = Path(get_default_hermes_root())
     except Exception:  # noqa: BLE001 - compatibility across Hermes releases
-        return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+        home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+    # Some Hermes command dispatch paths memoize the active named profile
+    # before plugins load. Keep shared control data anchored at the root.
+    return home.parent.parent if home.parent.name == "profiles" else home
 
 
 def _selected_profile(explicit: str | None) -> str:
