@@ -1511,9 +1511,7 @@ class MobileAPI:
         except MobileError as exc:
             if exc.status == 404:
                 await asyncio.to_thread(
-                    store.update_scheduled_task,
-                    mapping["public_id"],
-                    {"deleted_at": iso()},
+                    store.delete_scheduled_task, mapping["public_id"]
                 )
                 raise MobileError(
                     "scheduled_task_not_found", "Tarea programada no encontrada.", 404
@@ -1578,11 +1576,7 @@ class MobileAPI:
         await self.runtime.facade.delete_scheduled_task(
             profile, mapping["hermes_job_id"]
         )
-        await asyncio.to_thread(
-            store.update_scheduled_task,
-            mapping["public_id"],
-            {"deleted_at": iso()},
-        )
+        await asyncio.to_thread(store.delete_scheduled_task, mapping["public_id"])
         return web.Response(status=204)
 
     async def _scheduled_task_action(

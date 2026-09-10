@@ -797,3 +797,18 @@ async def test_scheduled_task_hub_uses_native_cron_and_optional_conversation(
         f"/p/default/v1/mobile/scheduled-tasks/{task['id']}", headers=headers
     )
     assert deleted.status == 204
+    store = runtime.store("default")
+    assert store.scheduled_task(task["id"]) is None
+    assert all(store.scheduled_run(item["id"]) is None for item in run_items)
+    with store.connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM scheduled_run_state WHERE task_id=?", (task["id"],)
+        ).fetchone()[0] == 0
+        deletion = connection.execute(
+            "SELECT operation,payload_json FROM sync_journal "
+            "WHERE entity_type='scheduled_task' AND entity_id=? "
+            "ORDER BY sequence DESC LIMIT 1",
+            (task["id"],),
+        ).fetchone()
+    assert deletion["operation"] == "deleted"
+    assert json.loads(deletion["payload_json"])["deleted_at"]

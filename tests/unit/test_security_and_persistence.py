@@ -131,3 +131,27 @@ def test_profile_store_migrates_and_persists_conversation_reasoning(tmp_path):
     assert store.conversation("conv_existing")["reasoning_effort"] is None
     store.update_conversation("conv_existing", {"reasoning_effort": "xhigh"})
     assert store.conversation("conv_existing")["reasoning_effort"] == "xhigh"
+
+
+def test_deleting_scheduled_task_removes_runs_and_keeps_tombstone(tmp_path):
+    store = ProfileStore(tmp_path)
+    store.initialize()
+    task = store.ensure_scheduled_task("native-job")
+    run = store.ensure_scheduled_run(
+        task["public_id"], "native-execution", "2026-09-10T08:00:00Z"
+    )
+
+    deleted = store.delete_scheduled_task(task["public_id"])
+
+    assert deleted is not None and deleted["deleted_at"]
+    assert store.scheduled_task(task["public_id"]) is None
+    assert store.scheduled_run(run["public_id"]) is None
+    with store.connect() as connection:
+        journal = connection.execute(
+            "SELECT operation,payload_json FROM sync_journal "
+            "WHERE entity_type='scheduled_task' AND entity_id=? "
+            "ORDER BY sequence DESC LIMIT 1",
+            (task["public_id"],),
+        ).fetchone()
+    assert journal["operation"] == "deleted"
+    assert json.loads(journal["payload_json"])["deleted_at"] == deleted["deleted_at"]

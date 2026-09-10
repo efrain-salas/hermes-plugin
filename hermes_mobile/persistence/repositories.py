@@ -991,6 +991,39 @@ class ProfileStore(SQLiteStore):
 
         return self.transaction(_update)
 
+    def delete_scheduled_task(self, public_id: str) -> dict[str, Any] | None:
+        """Soft-delete a task while removing its profile-local run state."""
+        now = iso()
+
+        def _delete(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute(
+                "SELECT * FROM scheduled_task_map WHERE public_id=?",
+                (public_id,),
+            ).fetchone()
+            if not row:
+                return None
+            conn.execute(
+                "DELETE FROM scheduled_run_state WHERE task_id=?", (public_id,)
+            )
+            conn.execute(
+                "UPDATE scheduled_task_map SET updated_at=?,deleted_at=? "
+                "WHERE public_id=?",
+                (now, now, public_id),
+            )
+            self._journal_conn(
+                conn,
+                "scheduled_task",
+                public_id,
+                "deleted",
+                {"id": public_id, "updated_at": now, "deleted_at": now},
+            )
+            deleted = conn.execute(
+                "SELECT * FROM scheduled_task_map WHERE public_id=?", (public_id,)
+            ).fetchone()
+            return dict(deleted)
+
+        return self.transaction(_delete)
+
     def ensure_scheduled_run(
         self, task_id: str, hermes_execution_id: str, created_at: str
     ) -> dict[str, Any]:
