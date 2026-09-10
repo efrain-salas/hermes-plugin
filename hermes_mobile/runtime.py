@@ -446,28 +446,30 @@ class MobileRuntime:
             title, body = await self._completed_notification_copy(
                 profile, store, run, response_text
             )
-        item, _created = await asyncio.to_thread(
-            store.create_inbox_item,
-            kind=kind,
-            severity=(
-                "action_required"
-                if status == "approval.requested"
-                else "error"
-                if status == "failed"
-                else "info"
-            ),
-            title=title,
-            body=body,
-            source_type=source_type,
-            source_id=source_id,
-            dedupe_key=f"{kind}:{source_id}",
-            conversation_id=run["conversation_id"],
-            context={
-                "run_id": run_id,
-                "conversation_id": run["conversation_id"],
-                **({"approval_id": approval_id} if approval_id else {}),
-            },
-        )
+        item = None
+        if status != "completed":
+            item, _created = await asyncio.to_thread(
+                store.create_inbox_item,
+                kind=kind,
+                severity=(
+                    "action_required"
+                    if status == "approval.requested"
+                    else "error"
+                    if status == "failed"
+                    else "info"
+                ),
+                title=title,
+                body=body,
+                source_type=source_type,
+                source_id=source_id,
+                dedupe_key=f"{kind}:{source_id}",
+                conversation_id=run["conversation_id"],
+                context={
+                    "run_id": run_id,
+                    "conversation_id": run["conversation_id"],
+                    **({"approval_id": approval_id} if approval_id else {}),
+                },
+            )
         payload = {
             "title": title,
             "body": body,
@@ -476,7 +478,7 @@ class MobileRuntime:
                 "profile": profile,
                 "conversation_id": run["conversation_id"],
                 "run_id": run_id,
-                "inbox_item_id": item["public_id"],
+                **({"inbox_item_id": item["public_id"]} if item else {}),
                 **({"approval_id": approval_id} if approval_id else {}),
             },
         }

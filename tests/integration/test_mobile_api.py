@@ -45,10 +45,8 @@ async def test_completed_run_notification_uses_conversation_and_response(
 
     await runtime._mirror_run("default", run["public_id"], "native-notification-run")
 
-    item = store.inbox_item_by_source("run", run["public_id"])
     expected_body = "Primera línea de la respuesta. Segunda línea con más contexto."
-    assert item and item["title"] == "Plan del viaje"
-    assert item["body"] == expected_body
+    assert store.inbox_item_by_source("run", run["public_id"]) is None
     assert pushes == [
         (
             "default",
@@ -62,7 +60,6 @@ async def test_completed_run_notification_uses_conversation_and_response(
                     "profile": "default",
                     "conversation_id": conversation["public_id"],
                     "run_id": run["public_id"],
-                    "inbox_item_id": item["public_id"],
                 },
             },
         )

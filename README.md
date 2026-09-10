@@ -128,7 +128,9 @@ las ejecuciones siguen apareciendo como no leídas en el hub.
 
 `GET /p/{profile}/v1/mobile/inbox` es la fuente durable para avisos que antes dependían de un
 canal de mensajería: ciclo de vida del Gateway, fallos de persistencia detectados al arrancar,
-respuestas terminadas o fallidas, aprobaciones y resultados programados. Admite `unread=true`
+respuestas fallidas, aprobaciones y resultados programados. Las respuestas normales permanecen
+en su conversación y pueden generar una notificación push, pero no crean elementos en la bandeja
+general. Admite `unread=true`
 (pendientes), `unread=false` (leídos),
 `kind=<tipo o prefijo>`, `limit` y `cursor`, y
 devuelve `unread_count` global además de las acciones válidas para cada elemento.
@@ -150,7 +152,7 @@ Los valores procedentes de ejecuciones se marcan expresamente como datos no conf
 
 Los cambios de bandeja también se publican en el `sync_journal`, de modo que `/sync` entrega eventos
 `inbox_item.created` e `inbox_item.updated`. El push contiene `inbox_item_id` para abrir directamente
-el elemento, pero SQLite y `/sync` siguen siendo la fuente de verdad.
+el elemento cuando procede de la bandeja, pero SQLite y `/sync` siguen siendo la fuente de verdad.
 
 El listado evita incluir resultados extensos; `GET /inbox/{id}` devuelve el contexto completo del
 elemento. Marcar un resultado programado como leído, desde la bandeja o desde el hub, mantiene ambos
