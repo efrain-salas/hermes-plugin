@@ -1,5 +1,5 @@
 CONTROL_SCHEMA_VERSION = 2
-PROFILE_SCHEMA_VERSION = 2
+PROFILE_SCHEMA_VERSION = 3
 
 CONTROL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -131,6 +131,11 @@ CREATE TABLE IF NOT EXISTS conversation_map (
     title_override TEXT,
     pinned INTEGER NOT NULL DEFAULT 0,
     archived INTEGER NOT NULL DEFAULT 0,
+    reasoning_effort TEXT CHECK(
+        reasoning_effort IS NULL OR reasoning_effort IN (
+            'none','minimal','low','medium','high','xhigh','max','ultra'
+        )
+    ),
     last_read_message_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,

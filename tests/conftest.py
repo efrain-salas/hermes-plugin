@@ -24,6 +24,14 @@ class FakeFacade:
         self.executions: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         self.outputs: dict[tuple[str, str], str] = {}
         self.mirrored_results: list[tuple[str, str]] = []
+        self.created_bodies: list[tuple[str, dict[str, Any]]] = []
+        self.model_updates: list[tuple[str, str, str, str | None]] = []
+        self.preference_updates: list[dict[str, Any]] = []
+        self.profile_preferences_data: dict[str, Any] = {
+            "model": "mock-model",
+            "provider": "mock",
+            "reasoning_effort": "medium",
+        }
         self.counter = 0
         self.fail = False
 
@@ -52,6 +60,7 @@ class FakeFacade:
 
     async def create_conversation(self, profile, body):
         self._guard()
+        self.created_bodies.append((profile, body))
         self.counter += 1
         sid = f"internal-{profile}-{self.counter}"
         row = {
@@ -76,7 +85,10 @@ class FakeFacade:
         self.sessions[profile][session_id].update(body)
         return {"session": self.sessions[profile][session_id]}
 
-    async def set_conversation_model(self, profile, session_id, model):
+    async def set_conversation_model(
+        self, profile, session_id, model, reasoning_effort=None
+    ):
+        self.model_updates.append((profile, session_id, model, reasoning_effort))
         self.sessions[profile][session_id]["model"] = model
         return {"session": self.sessions[profile][session_id]}
 
@@ -202,10 +214,77 @@ class FakeFacade:
     async def models(self, profile):
         self._guard()
         return {
-            "data": [{"id": "mock-model-next"}, {"id": "mock-model"}],
+            "data": [
+                {
+                    "id": "mock-model-next",
+                    "reasoning": {
+                        "supported": True,
+                        "can_disable": False,
+                        "efforts": [
+                            "minimal",
+                            "low",
+                            "medium",
+                            "high",
+                            "xhigh",
+                            "max",
+                            "ultra",
+                        ],
+                    },
+                },
+                {
+                    "id": "mock-model",
+                    "reasoning": {
+                        "supported": True,
+                        "can_disable": True,
+                        "efforts": [
+                            "none",
+                            "minimal",
+                            "low",
+                            "medium",
+                            "high",
+                            "xhigh",
+                            "max",
+                            "ultra",
+                        ],
+                    },
+                },
+                {
+                    "id": "mock-no-reasoning",
+                    "reasoning": {
+                        "supported": False,
+                        "can_disable": None,
+                        "efforts": [],
+                    },
+                },
+            ],
             "default": "mock-model",
             "provider": "mock",
         }
+
+    def read(self, _profile_home, *, model=""):
+        return dict(self.profile_preferences_data)
+
+    def update(
+        self,
+        _profile_home,
+        *,
+        model,
+        update_model,
+        reasoning_effort,
+        update_reasoning,
+    ):
+        call = {
+            "model": model,
+            "update_model": update_model,
+            "reasoning_effort": reasoning_effort,
+            "update_reasoning": update_reasoning,
+        }
+        self.preference_updates.append(call)
+        if update_model:
+            self.profile_preferences_data["model"] = model
+        if update_reasoning:
+            self.profile_preferences_data["reasoning_effort"] = reasoning_effort
+        return dict(self.profile_preferences_data)
 
     async def toolsets(self, profile):
         self._guard()
@@ -227,7 +306,12 @@ async def runtime(tmp_path: Path, fake_facade: FakeFacade):
     config = MobileConfig(
         default_home=tmp_path, push=PushConfig(enabled=False), pairing_ttl_seconds=600
     )
-    value = MobileRuntime(config, facade=fake_facade, cron_reader=fake_facade)  # type: ignore[arg-type]
+    value = MobileRuntime(
+        config,
+        facade=fake_facade,
+        cron_reader=fake_facade,
+        profile_preferences=fake_facade,
+    )  # type: ignore[arg-type]
     yield value
     if value.started:
         await value.close()

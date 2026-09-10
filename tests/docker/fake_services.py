@@ -38,7 +38,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.endswith("/models"):
             self._json(
                 200,
-                {"object": "list", "data": [{"id": "mock-model", "object": "model"}]},
+                {
+                    "object": "list",
+                    "data": [
+                        {"id": "mock-model", "object": "model"},
+                        {"id": "mock-model-next", "object": "model"},
+                    ],
+                },
             )
         elif self.path == "/messages":
             with State.lock:

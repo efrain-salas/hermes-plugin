@@ -12,6 +12,7 @@ from aiohttp.test_utils import TestServer
 
 from hermes_mobile.api.errors import MobileError
 from hermes_mobile.config import MobileConfig, PushConfig
+from hermes_mobile.constants import REASONING_EFFORTS
 from hermes_mobile.files.extraction import ExtractionError, extract_attachment
 from hermes_mobile.files.tool import read_attachment
 from hermes_mobile.hermes.api_client import HermesAPIClient
@@ -281,6 +282,7 @@ async def test_push_worker_temporary_retry_and_attempt_limit(tmp_path, monkeypat
 @pytest.mark.asyncio
 async def test_loopback_client_auth_paths_errors_and_sse():
     seen: list[tuple[str, str]] = []
+    model_updates: list[dict] = []
 
     async def handler(request):
         seen.append((request.method, request.path))
@@ -300,10 +302,20 @@ async def test_loopback_client_auth_paths_errors_and_sse():
                             "slug": "openai-codex",
                             "is_current": True,
                             "models": ["gpt-next", "gpt-current", "gpt-next"],
+                            "capabilities": {
+                                "gpt-next": {
+                                    "reasoning": True,
+                                    "can_disable_reasoning": False,
+                                },
+                                "gpt-current": {"reasoning": False},
+                            },
                         },
                     ],
                 }
             )
+        if request.path.endswith("/api/sessions/s1/model"):
+            model_updates.append(await request.json())
+            return web.json_response({"session": {"id": "s1"}})
         if request.path.endswith("/events"):
             return web.Response(
                 text='data: {"event":"run.started"}\n\ndata: {"event":"run.completed"}\n\n',
@@ -334,7 +346,13 @@ async def test_loopback_client_auth_paths_errors_and_sse():
         await client.capabilities("mujer")
         await client.get_conversation("mujer", "s1")
         await client.update_conversation("mujer", "s1", {"title": "new"})
-        await client.set_conversation_model("mujer", "s1", "mock")
+        await client.set_conversation_model("mujer", "s1", "mock", "high")
+        assert model_updates == [
+            {
+                "model": "mock",
+                "model_options": {"reasoning": {"enabled": True, "effort": "high"}},
+            }
+        ]
         await client.get_messages("mujer", "s1", limit=2)
         await client.fork_conversation("mujer", "s1", {"title": "fork"})
         assert await client.models("mujer") == {
@@ -343,11 +361,21 @@ async def test_loopback_client_auth_paths_errors_and_sse():
                     "id": "gpt-next",
                     "object": "model",
                     "owned_by": "openai-codex",
+                    "reasoning": {
+                        "supported": True,
+                        "can_disable": False,
+                        "efforts": list(REASONING_EFFORTS[1:]),
+                    },
                 },
                 {
                     "id": "gpt-current",
                     "object": "model",
                     "owned_by": "openai-codex",
+                    "reasoning": {
+                        "supported": False,
+                        "can_disable": None,
+                        "efforts": [],
+                    },
                 },
             ],
             "default": "gpt-current",

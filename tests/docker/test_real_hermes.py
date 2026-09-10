@@ -9,6 +9,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 
 pytestmark = pytest.mark.docker
 BASE = os.environ.get("HERMES_MOBILE_TEST_URL", "http://127.0.0.1:18642")
@@ -43,15 +44,24 @@ async def _pair(client: httpx.AsyncClient, profile: str) -> dict:
 
 
 async def _create_conversation(
-    client: httpx.AsyncClient, profile: str, token: str, title: str
+    client: httpx.AsyncClient,
+    profile: str,
+    token: str,
+    title: str,
+    *,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict:
+    payload = {"title": title, "model": model}
+    if reasoning_effort is not None:
+        payload["reasoning_effort"] = reasoning_effort
     response = await client.post(
         f"/p/{profile}/v1/mobile/conversations",
         headers={
             "Authorization": f"Bearer {token}",
             "Idempotency-Key": str(uuid.uuid4()),
         },
-        json={"title": title, "model": None},
+        json=payload,
     )
     assert response.status_code == 201, response.text
     return response.json()
@@ -152,9 +162,47 @@ async def test_real_multiplexed_hermes_mobile_surface():
         )
         assert device.status_code == 200, device.text
 
+        model_info = (
+            await client.get("/p/default/v1/mobile/models", headers=default_headers)
+        ).json()
+        assert model_info["default"] == "mock-model"
+        assert set(model_info["items"][0]["reasoning"]["efforts"]) >= {
+            "none",
+            "minimal",
+            "medium",
+            "ultra",
+        }
+
         default_conv = await _create_conversation(
-            client, "default", default_token, "Default private"
+            client,
+            "default",
+            default_token,
+            "Default private",
+            model="mock-model-next",
+            reasoning_effort="high",
         )
+        assert default_conv["model"] == "mock-model-next"
+        assert default_conv["reasoning_effort"] == "high"
+        default_config = yaml.safe_load(
+            (DATA / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert default_config["model"]["default"] == "mock-model-next"
+        assert default_config["agent"]["reasoning_effort"] == "high"
+
+        patched_runtime = await client.patch(
+            f"/p/default/v1/mobile/conversations/{default_conv['id']}",
+            headers=default_headers,
+            json={"model": "mock-model", "reasoning_effort": "low"},
+        )
+        assert patched_runtime.status_code == 200, patched_runtime.text
+        assert patched_runtime.json()["model"] == "mock-model"
+        assert patched_runtime.json()["reasoning_effort"] == "low"
+        default_config = yaml.safe_load(
+            (DATA / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert default_config["model"]["default"] == "mock-model-next"
+        assert default_config["agent"]["reasoning_effort"] == "high"
+
         mujer_conv = await _create_conversation(
             client, "mujer", mujer_token, "Mujer private"
         )

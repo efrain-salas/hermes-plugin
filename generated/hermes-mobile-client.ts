@@ -4,6 +4,12 @@ export type Json = null | boolean | number | string | Json[] | { [key: string]: 
 export interface MobileError { code: string; message: string; request_id: string; retryable: boolean; details: Record<string, Json>; }
 export interface ErrorEnvelope { error: MobileError; }
 export interface RunEvent { event_id: string; sequence: number; type: string; run_id: string; conversation_id: string; created_at: string; data: Record<string, Json>; }
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+export interface ModelReasoning { supported: boolean; can_disable: boolean | null; efforts: ReasoningEffort[]; }
+export interface ModelInfo { id: string; name: string; reasoning: ModelReasoning; }
+export interface ModelsResponse { items: ModelInfo[]; default: string | null; default_reasoning_effort: ReasoningEffort | null; }
+export interface ConversationCreateInput { title?: string | null; model?: string | null; reasoning_effort?: ReasoningEffort | null; }
+export interface ConversationPatchInput extends ConversationCreateInput { archived?: boolean | null; pinned?: boolean | null; }
 export interface RequestOptions { body?: unknown; query?: Record<string, string | number | boolean | undefined>; idempotencyKey?: string; signal?: AbortSignal; }
 export interface StreamOptions extends RequestOptions { lastEventId?: string; }
 
@@ -11,7 +17,7 @@ export class HermesMobileClient {
   constructor(public baseUrl: string, public profile: string, private accessToken?: string) {}
   setAccessToken(token?: string): void { this.accessToken = token; }
   private path(template: string, params: Record<string, string>): string { return template.replace(/\{([^}]+)\}/g, (_, key: string) => encodeURIComponent(params[key] ?? "")); }
-  private async request(method: string, path: string, options: RequestOptions = {}): Promise<unknown> {
+  private async request<T = unknown>(method: string, path: string, options: RequestOptions = {}): Promise<T> {
     const url = new URL(path, this.baseUrl);
     for (const [key, value] of Object.entries(options.query ?? {})) if (value !== undefined) url.searchParams.set(key, String(value));
     const headers: Record<string, string> = { Accept: "application/json" };
@@ -20,10 +26,10 @@ export class HermesMobileClient {
     let body: BodyInit | undefined;
     if (options.body instanceof FormData) body = options.body; else if (options.body !== undefined) { headers["Content-Type"] = "application/json"; body = JSON.stringify(options.body); }
     const response = await fetch(url, { method, headers, body, signal: options.signal });
-    if (response.status === 204) return undefined;
+    if (response.status === 204) return undefined as T;
     const payload = await response.json();
     if (!response.ok) throw (payload as ErrorEnvelope).error;
-    return payload;
+    return payload as T;
   }
   private async *events(path: string, options: StreamOptions = {}): AsyncGenerator<RunEvent> {
     const url = new URL(path, this.baseUrl);
@@ -94,7 +100,7 @@ export class HermesMobileClient {
   getAttachmentContent(attachment_id: string, options: RequestOptions = {}): Promise<unknown> { return this.request("GET", this.path("/p/{profile}/v1/mobile/attachments/{attachment_id}/content", { profile: this.profile, attachment_id: attachment_id }), options); }
   deleteAttachment(attachment_id: string, options: RequestOptions = {}): Promise<unknown> { return this.request("DELETE", this.path("/p/{profile}/v1/mobile/attachments/{attachment_id}", { profile: this.profile, attachment_id: attachment_id }), options); }
   retryAttachment(attachment_id: string, options: RequestOptions = {}): Promise<unknown> { return this.request("POST", this.path("/p/{profile}/v1/mobile/attachments/{attachment_id}/retry", { profile: this.profile, attachment_id: attachment_id }), options); }
-  listModels(options: RequestOptions = {}): Promise<unknown> { return this.request("GET", this.path("/p/{profile}/v1/mobile/models", { profile: this.profile }), options); }
+  listModels(options: RequestOptions = {}): Promise<ModelsResponse> { return this.request<ModelsResponse>("GET", this.path("/p/{profile}/v1/mobile/models", { profile: this.profile }), options); }
   listToolsets(options: RequestOptions = {}): Promise<unknown> { return this.request("GET", this.path("/p/{profile}/v1/mobile/toolsets", { profile: this.profile }), options); }
   sync(options: RequestOptions = {}): Promise<unknown> { return this.request("GET", this.path("/p/{profile}/v1/mobile/sync", { profile: this.profile }), options); }
 }

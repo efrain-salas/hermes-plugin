@@ -9,6 +9,7 @@ from .files.extraction import ExtractionError, extract_attachment
 from .hermes.api_client import HermesAPIClient
 from .hermes.cron_reader import NativeCronReader
 from .hermes.event_mapper import map_event
+from .hermes.profile_preferences import NativeProfilePreferences
 from .lifecycle import TaskSupervisor
 from .notifications.worker import PushWorker
 from .persistence.repositories import ControlStore, ProfileStore, iso
@@ -29,6 +30,7 @@ class MobileRuntime:
         config: MobileConfig,
         facade: HermesAPIClient | None = None,
         cron_reader: NativeCronReader | None = None,
+        profile_preferences: NativeProfilePreferences | None = None,
     ):
         self.config = config
         data_root = config.default_home / "plugin-data" / "hermes-mobile"
@@ -37,6 +39,7 @@ class MobileRuntime:
         self.box = SecretBox(data_root / "keys" / "data-encryption.key")
         self.facade = facade or HermesAPIClient(config.loopback_base_url)
         self.cron_reader = cron_reader or NativeCronReader()
+        self.profile_preferences = profile_preferences or NativeProfilePreferences()
         self.supervisor = TaskSupervisor()
         self.push_worker = PushWorker(self.control, self.box, config.push)
         self._stores: dict[str, ProfileStore] = {}

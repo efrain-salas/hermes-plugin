@@ -34,7 +34,13 @@ async def test_system_auth_devices_refresh_and_logout(client, runtime, auth):
     assert (await capabilities.json())["streaming"] is True
     bootstrap = await client.get("/p/default/v1/mobile/bootstrap", headers=headers)
     assert bootstrap.status == 200 and bootstrap.headers["ETag"]
-    assert (await bootstrap.json())["default_model"] == "mock-model"
+    bootstrap_body = await bootstrap.json()
+    assert bootstrap_body["default_model"] == "mock-model"
+    assert bootstrap_body["default_reasoning_effort"] == "medium"
+    assert bootstrap_body["preferences"] == {
+        "model": "mock-model",
+        "reasoning_effort": "medium",
+    }
     cached = await client.get(
         "/p/default/v1/mobile/bootstrap",
         headers={**headers, "If-None-Match": bootstrap.headers["ETag"]},
@@ -143,6 +149,95 @@ async def test_conversation_full_lifecycle_and_idempotency(client, auth):
     ).status == 404
 
 
+async def test_conversation_model_reasoning_and_profile_preference_scope(
+    client, fake_facade, auth
+):
+    _, headers = auth
+    created = await client.post(
+        "/p/default/v1/mobile/conversations",
+        headers={**headers, "Idempotency-Key": "create-reasoning"},
+        json={
+            "title": "Reasoning",
+            "model": "mock-model-next",
+            "reasoning_effort": "high",
+        },
+    )
+    assert created.status == 201, await created.text()
+    conversation = await created.json()
+    assert conversation["model"] == "mock-model-next"
+    assert conversation["reasoning_effort"] == "high"
+    assert fake_facade.created_bodies[-1][1] == {
+        "title": "Reasoning",
+        "model": "mock-model-next",
+        "model_options": {"reasoning": {"enabled": True, "effort": "high"}},
+        "require_model_lock": True,
+    }
+    assert fake_facade.preference_updates == [
+        {
+            "model": "mock-model-next",
+            "update_model": True,
+            "reasoning_effort": "high",
+            "update_reasoning": True,
+        }
+    ]
+    replay = await client.post(
+        "/p/default/v1/mobile/conversations",
+        headers={**headers, "Idempotency-Key": "create-reasoning"},
+        json={
+            "title": "Reasoning",
+            "model": "mock-model-next",
+            "reasoning_effort": "high",
+        },
+    )
+    assert replay.status == 201
+    assert (await replay.json())["id"] == conversation["id"]
+    assert len(fake_facade.preference_updates) == 1
+
+    patched = await client.patch(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}",
+        headers=headers,
+        json={"model": "mock-model", "reasoning_effort": "low"},
+    )
+    assert patched.status == 200, await patched.text()
+    assert (await patched.json())["reasoning_effort"] == "low"
+    assert fake_facade.model_updates[-1][2:] == ("mock-model", "low")
+    assert len(fake_facade.preference_updates) == 1
+    assert fake_facade.profile_preferences_data == {
+        "model": "mock-model-next",
+        "provider": "mock",
+        "reasoning_effort": "high",
+    }
+
+    inherited = await client.patch(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}",
+        headers=headers,
+        json={"reasoning_effort": None},
+    )
+    assert inherited.status == 200, await inherited.text()
+    assert (await inherited.json())["reasoning_effort"] is None
+    assert fake_facade.model_updates[-1][2:] == ("mock-model", None)
+    assert len(fake_facade.preference_updates) == 1
+
+    unsupported = await client.post(
+        "/p/default/v1/mobile/conversations",
+        headers={**headers, "Idempotency-Key": "create-no-reasoning"},
+        json={
+            "model": "mock-no-reasoning",
+            "reasoning_effort": "high",
+        },
+    )
+    assert unsupported.status == 400
+    assert (await unsupported.json())["error"]["code"] == "reasoning_unavailable"
+
+    required = await client.post(
+        "/p/default/v1/mobile/conversations",
+        headers={**headers, "Idempotency-Key": "create-required-reasoning"},
+        json={"model": "mock-model-next", "reasoning_effort": "none"},
+    )
+    assert required.status == 400
+    assert (await required.json())["error"]["code"] == "reasoning_required"
+
+
 async def test_attachment_run_sse_sync_models_and_toolsets(
     client, runtime, fake_facade, auth
 ):
@@ -247,10 +342,53 @@ async def test_attachment_run_sse_sync_models_and_toolsets(
     models = await client.get("/p/default/v1/mobile/models", headers=headers)
     assert await models.json() == {
         "items": [
-            {"id": "mock-model-next", "name": "mock-model-next"},
-            {"id": "mock-model", "name": "mock-model"},
+            {
+                "id": "mock-model-next",
+                "name": "mock-model-next",
+                "reasoning": {
+                    "supported": True,
+                    "can_disable": False,
+                    "efforts": [
+                        "minimal",
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh",
+                        "max",
+                        "ultra",
+                    ],
+                },
+            },
+            {
+                "id": "mock-model",
+                "name": "mock-model",
+                "reasoning": {
+                    "supported": True,
+                    "can_disable": True,
+                    "efforts": [
+                        "none",
+                        "minimal",
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh",
+                        "max",
+                        "ultra",
+                    ],
+                },
+            },
+            {
+                "id": "mock-no-reasoning",
+                "name": "mock-no-reasoning",
+                "reasoning": {
+                    "supported": False,
+                    "can_disable": None,
+                    "efforts": [],
+                },
+            },
         ],
         "default": "mock-model",
+        "default_reasoning_effort": "medium",
     }
     toolsets = await client.get("/p/default/v1/mobile/toolsets", headers=headers)
     assert (await toolsets.json())["items"][0]["id"] == "hermes_mobile"

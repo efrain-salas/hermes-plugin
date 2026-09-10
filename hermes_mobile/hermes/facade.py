@@ -19,7 +19,11 @@ class HermesFacade(Protocol):
         self, profile: str, session_id: str, body: dict[str, Any]
     ) -> dict[str, Any]: ...
     async def set_conversation_model(
-        self, profile: str, session_id: str, model: str
+        self,
+        profile: str,
+        session_id: str,
+        model: str,
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any]: ...
     async def delete_conversation(self, profile: str, session_id: str) -> None: ...
     async def get_messages(

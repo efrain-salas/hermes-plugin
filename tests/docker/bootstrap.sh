@@ -16,6 +16,7 @@ configure_profile() {
   "$HERMES" "${profile_flag[@]}" config set providers.mock.api_mode chat_completions
   "$HERMES" "${profile_flag[@]}" config set providers.mock.key_env MOCK_API_KEY
   "$HERMES" "${profile_flag[@]}" config set providers.mock.models.mock-model '{}'
+  "$HERMES" "${profile_flag[@]}" config set providers.mock.models.mock-model-next '{}'
   "$HERMES" "${profile_flag[@]}" config set providers.mock.context_length 4096
   "$HERMES" "${profile_flag[@]}" config set MOCK_API_KEY e2e-mock-key
 }

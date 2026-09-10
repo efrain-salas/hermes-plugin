@@ -9,6 +9,7 @@ from urllib.parse import quote
 import aiohttp
 
 from ..api.errors import MobileError
+from ..constants import REASONING_EFFORTS
 
 
 class HermesAPIClient:
@@ -164,14 +165,26 @@ class HermesAPIClient:
         )[1]
 
     async def set_conversation_model(
-        self, profile: str, session_id: str, model: str
+        self,
+        profile: str,
+        session_id: str,
+        model: str,
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
+        reasoning: dict[str, Any] = {"enabled": reasoning_effort != "none"}
+        if reasoning_effort not in {None, "none"}:
+            reasoning["effort"] = reasoning_effort
         return (
             await self._request(
                 "POST",
                 profile,
                 f"/api/sessions/{quote(session_id, safe='')}/model",
-                json={"model": model},
+                json={
+                    "model": model,
+                    "model_options": (
+                        {"reasoning": reasoning} if reasoning_effort else {}
+                    ),
+                },
                 expected={200},
             )
         )[1]
@@ -414,11 +427,18 @@ class HermesAPIClient:
                 raw_models = current.get("models")
                 if not isinstance(raw_models, list):
                     raw_models = []
+                raw_capabilities = current.get("capabilities")
+                if not isinstance(raw_capabilities, dict):
+                    raw_capabilities = {}
                 provider_models = [
                     model.strip()
                     for model in raw_models
                     if isinstance(model, str) and model.strip()
                 ]
+            else:
+                raw_capabilities = {}
+        else:
+            raw_capabilities = {}
 
         # The configured model remains selectable even if a live/curated
         # provider catalog is temporarily empty or stale.
@@ -427,11 +447,34 @@ class HermesAPIClient:
 
         return {
             "data": [
-                {"id": model, "object": "model", "owned_by": provider}
+                self._model_resource(model, provider, raw_capabilities)
                 for model in dict.fromkeys(provider_models)
             ],
             "default": default_model or None,
             "provider": provider or None,
+        }
+
+    @staticmethod
+    def _model_resource(
+        model: str, provider: str, capabilities: dict[str, Any]
+    ) -> dict[str, Any]:
+        raw = capabilities.get(model)
+        raw = raw if isinstance(raw, dict) else {}
+        supports_reasoning = raw.get("reasoning") is not False
+        can_disable = raw.get("can_disable_reasoning")
+        can_disable = can_disable if isinstance(can_disable, bool) else None
+        efforts = list(REASONING_EFFORTS) if supports_reasoning else []
+        if can_disable is False:
+            efforts.remove("none")
+        return {
+            "id": model,
+            "object": "model",
+            "owned_by": provider,
+            "reasoning": {
+                "supported": supports_reasoning,
+                "can_disable": can_disable,
+                "efforts": efforts,
+            },
         }
 
     async def toolsets(self, profile: str) -> dict[str, Any]:

@@ -74,6 +74,7 @@ class SQLiteStore:
             pass
         with self.connect() as conn:
             conn.executescript(self.schema)
+            self._migrate(conn)
             conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                 (self.version, iso()),
@@ -82,6 +83,9 @@ class SQLiteStore:
             self.path.chmod(0o600)
         except OSError:
             pass
+
+    def _migrate(self, _conn: sqlite3.Connection) -> None:
+        return
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -771,6 +775,17 @@ class ProfileStore(SQLiteStore):
             except OSError:
                 pass
 
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(conversation_map)")
+        }
+        if "reasoning_effort" not in columns:
+            conn.execute(
+                "ALTER TABLE conversation_map ADD COLUMN reasoning_effort TEXT "
+                "CHECK(reasoning_effort IS NULL OR reasoning_effort IN "
+                "('none','minimal','low','medium','high','xhigh','max','ultra'))"
+            )
+
     def ensure_conversation(
         self, hermes_id: str, metadata: dict[str, Any] | None = None
     ) -> dict[str, Any]:
@@ -833,6 +848,7 @@ class ProfileStore(SQLiteStore):
             "title_override",
             "pinned",
             "archived",
+            "reasoning_effort",
             "last_read_message_id",
             "deleted_at",
         }

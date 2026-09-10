@@ -21,6 +21,7 @@ from pydantic import ValidationError
 from ..constants import (
     API_VERSION,
     DEFAULT_SCOPES,
+    REASONING_EFFORTS,
     SUPPORTED_MIME_TYPES,
     TERMINAL_RUN_STATUSES,
 )
@@ -410,6 +411,14 @@ class MobileAPI:
         caps_response = await self.capabilities(request, subject)
         capabilities = json.loads(caps_response.body)
         models = await self.runtime.facade.models(profile)
+        default_model = models.get("default") or ((models.get("data") or [{}])[0]).get(
+            "id"
+        )
+        preferences = await asyncio.to_thread(
+            self.runtime.profile_preferences.read,
+            self.runtime.profile_home(profile),
+            model=default_model or "",
+        )
         payload = {
             "user": {
                 "id": subject["sub"],
@@ -419,9 +428,12 @@ class MobileAPI:
             "profile": {"id": profile},
             "device": self._device_resource(subject, current=True),
             "capabilities": capabilities,
-            "default_model": models.get("default")
-            or ((models.get("data") or [{}])[0]).get("id"),
-            "preferences": {},
+            "default_model": default_model,
+            "default_reasoning_effort": preferences.get("reasoning_effort"),
+            "preferences": {
+                "model": preferences.get("model") or default_model,
+                "reasoning_effort": preferences.get("reasoning_effort"),
+            },
             "limits": {"max_file_bytes": self.runtime.config.max_file_bytes},
         }
         etag = '"' + hashlib.sha256(json_dump(payload).encode()).hexdigest()[:24] + '"'
@@ -662,6 +674,7 @@ class MobileAPI:
             "id": mapping["public_id"],
             "title": mapping.get("title_override") or session.get("title"),
             "model": session.get("model"),
+            "reasoning_effort": mapping.get("reasoning_effort"),
             "status": status,
             "archived": bool(mapping.get("archived") or session.get("archived")),
             "pinned": bool(mapping.get("pinned") or session.get("pinned")),
@@ -727,7 +740,11 @@ class MobileAPI:
         body = await self._body(request, ConversationCreate)
         profile = self._profile(request)
         store = self.runtime.store(profile)
-        request_hash = hashlib.sha256(body.model_dump_json().encode()).hexdigest()
+        # Field presence is semantically relevant: an omitted reasoning effort
+        # leaves the profile preference untouched, while an explicit null clears it.
+        request_hash = hashlib.sha256(
+            json_dump(body.model_dump(exclude_unset=True)).encode()
+        ).hexdigest()
         scope = hashlib.sha256(
             f"{subject['sub']}\0{profile}\0POST\0conversations\0{key}".encode()
         ).hexdigest()
@@ -741,8 +758,65 @@ class MobileAPI:
             ) from exc
         if cached:
             return self._json(cached[1], cached[0])
-        payload = {"title": body.title, **({"model": body.model} if body.model else {})}
+
+        fields = body.model_fields_set
+        update_model = "model" in fields and body.model is not None
+        update_reasoning = "reasoning_effort" in fields
+        selected_model = body.model
+        if update_model or update_reasoning:
+            models = await self.runtime.facade.models(profile)
+            selected_model = selected_model or self._default_model(models)
+            self._validate_model_selection(
+                models, selected_model, body.reasoning_effort
+            )
+
+        payload: dict[str, Any] = {"title": body.title}
+        if selected_model and (update_model or update_reasoning):
+            payload.update(
+                {
+                    "model": selected_model,
+                    "model_options": self._reasoning_model_options(
+                        body.reasoning_effort
+                    ),
+                    "require_model_lock": True,
+                }
+            )
         native = await self.runtime.facade.create_conversation(profile, payload)
+        if update_model or update_reasoning:
+            try:
+                await asyncio.to_thread(
+                    self.runtime.profile_preferences.update,
+                    self.runtime.profile_home(profile),
+                    model=selected_model,
+                    update_model=update_model,
+                    reasoning_effort=body.reasoning_effort,
+                    update_reasoning=update_reasoning,
+                )
+            except Exception as exc:
+                try:
+                    await self.runtime.facade.delete_conversation(
+                        profile, native["session"]["id"]
+                    )
+                except Exception:
+                    logger.exception(
+                        "Could not roll back conversation after preference failure"
+                    )
+                raise MobileError(
+                    "profile_preference_update_failed",
+                    "No se pudo actualizar la preferencia del perfil.",
+                    503,
+                    retryable=True,
+                ) from exc
+
+        mapping = await asyncio.to_thread(
+            store.ensure_conversation, str(native["session"]["id"]), native["session"]
+        )
+        if update_reasoning:
+            await asyncio.to_thread(
+                store.update_conversation,
+                mapping["public_id"],
+                {"reasoning_effort": body.reasoning_effort},
+            )
         resource = await self._conversation_resource(profile, native["session"], store)
         await asyncio.to_thread(
             store.save_idempotency, scope, request_hash, 201, resource, resource["id"]
@@ -783,34 +857,49 @@ class MobileAPI:
         profile, store, row = await self._mapped_conversation(request)
         body = await self._body(request, ConversationPatch)
         values = body.model_dump(exclude_unset=True)
-        if "model" in values:
+        runtime_change = "model" in values or "reasoning_effort" in values
+        if runtime_change:
             models = await self.runtime.facade.models(profile)
-            if values["model"] not in {
-                item.get("id") for item in models.get("data", [])
-            }:
-                raise MobileError(
-                    "model_unavailable",
-                    "El modelo no está disponible en este perfil.",
-                    400,
+            selected_model = values.get("model")
+            if not selected_model:
+                current = await self.runtime.facade.get_conversation(
+                    profile, row["hermes_session_id"]
                 )
-            await self.runtime.facade.set_conversation_model(
-                profile, row["hermes_session_id"], values.pop("model")
+                selected_model = current["session"].get("model") or self._default_model(
+                    models
+                )
+            selected_reasoning = (
+                values.get("reasoning_effort")
+                if "reasoning_effort" in values
+                else row.get("reasoning_effort")
             )
+            self._validate_model_selection(models, selected_model, selected_reasoning)
+            await self.runtime.facade.set_conversation_model(
+                profile,
+                row["hermes_session_id"],
+                selected_model,
+                selected_reasoning,
+            )
+            values.pop("model", None)
+            values.pop("reasoning_effort", None)
         native_fields = {
             k: v for k, v in values.items() if k in {"title", "archived", "pinned"}
         }
         native = await self.runtime.facade.update_conversation(
             profile, row["hermes_session_id"], native_fields
         )
+        store_fields = {
+            "title_override": values.get("title")
+            if "title" in values
+            else row.get("title_override"),
+            **{k: values[k] for k in ("archived", "pinned") if k in values},
+        }
+        if "reasoning_effort" in body.model_fields_set:
+            store_fields["reasoning_effort"] = body.reasoning_effort
         await asyncio.to_thread(
             store.update_conversation,
             row["public_id"],
-            {
-                "title_override": values.get("title")
-                if "title" in values
-                else row.get("title_override"),
-                **{k: values[k] for k in ("archived", "pinned") if k in values},
-            },
+            store_fields,
         )
         return self._json(
             await self._conversation_resource(profile, native["session"], store)
@@ -1795,17 +1884,79 @@ class MobileAPI:
         return self._json(store.attachment_resource(current), 202)
 
     async def models(self, request: web.Request, _subject: dict | None) -> web.Response:
-        native = await self.runtime.facade.models(self._profile(request))
+        profile = self._profile(request)
+        native = await self.runtime.facade.models(profile)
         data = native.get("data", [])
+        default_model = self._default_model(native)
+        preferences = await asyncio.to_thread(
+            self.runtime.profile_preferences.read,
+            self.runtime.profile_home(profile),
+            model=default_model or "",
+        )
         return self._json(
             {
                 "items": [
-                    {"id": item.get("id"), "name": item.get("id")} for item in data
+                    {
+                        "id": item.get("id"),
+                        "name": item.get("id"),
+                        "reasoning": item.get("reasoning")
+                        or {
+                            "supported": True,
+                            "can_disable": None,
+                            "efforts": list(REASONING_EFFORTS),
+                        },
+                    }
+                    for item in data
                 ],
-                "default": native.get("default")
-                or (data[0].get("id") if data else None),
+                "default": default_model,
+                "default_reasoning_effort": preferences.get("reasoning_effort"),
             }
         )
+
+    @staticmethod
+    def _default_model(models: dict[str, Any]) -> str | None:
+        data = models.get("data") or []
+        value = models.get("default") or (data[0].get("id") if data else None)
+        return str(value) if value else None
+
+    @staticmethod
+    def _reasoning_model_options(effort: str | None) -> dict[str, Any]:
+        if effort is None:
+            return {}
+        reasoning: dict[str, Any] = {"enabled": effort != "none"}
+        if effort != "none":
+            reasoning["effort"] = effort
+        return {"reasoning": reasoning}
+
+    @staticmethod
+    def _validate_model_selection(
+        models: dict[str, Any], model: str | None, effort: str | None
+    ) -> None:
+        selected = next(
+            (item for item in models.get("data", []) if item.get("id") == model),
+            None,
+        )
+        if selected is None:
+            raise MobileError(
+                "model_unavailable",
+                "El modelo no está disponible en este perfil.",
+                400,
+            )
+        if effort is None:
+            return
+        reasoning = selected.get("reasoning") or {}
+        if reasoning.get("supported") is False:
+            raise MobileError(
+                "reasoning_unavailable",
+                "Este modelo no admite control de razonamiento.",
+                400,
+            )
+        if effort == "none" and reasoning.get("can_disable") is False:
+            raise MobileError(
+                "reasoning_required",
+                "Este modelo no permite desactivar el razonamiento.",
+                400,
+            )
 
     async def toolsets(
         self, request: web.Request, _subject: dict | None

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+ReasoningEffort: TypeAlias = Literal[
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
+]
 
 
 class DevicePair(StrictModel):
@@ -59,6 +64,7 @@ class DeviceUpdate(StrictModel):
 class ConversationCreate(StrictModel):
     title: str | None = Field(default=None, max_length=200)
     model: str | None = Field(default=None, max_length=200)
+    reasoning_effort: ReasoningEffort | None = None
 
 
 class ConversationPatch(StrictModel):
@@ -66,6 +72,7 @@ class ConversationPatch(StrictModel):
     archived: bool | None = None
     pinned: bool | None = None
     model: str | None = Field(default=None, max_length=200)
+    reasoning_effort: ReasoningEffort | None = None
 
 
 class ForkRequest(StrictModel):

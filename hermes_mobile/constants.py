@@ -1,6 +1,17 @@
 from __future__ import annotations
 
 API_VERSION = "1.0"
+
+REASONING_EFFORTS = (
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+)
 PLUGIN_ID = "hermes-mobile"
 DEFAULT_SCOPES = (
     "conversations:read",

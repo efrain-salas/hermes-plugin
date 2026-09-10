@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 
 from hermes_mobile.persistence.repositories import (
     ControlStore,
     InvalidPairing,
+    ProfileStore,
     RefreshReuse,
 )
 from hermes_mobile.security.tokens import SecretBox, TokenError, TokenManager
@@ -93,3 +95,39 @@ def test_outbox_is_deduplicated_and_respects_preferences(tmp_path):
         store.enqueue_push("default", "run.completed", "run_x", {"title": "Hermes"})
         == 0
     )
+
+
+def test_profile_store_migrates_and_persists_conversation_reasoning(tmp_path):
+    root = tmp_path / "plugin-data" / "hermes-mobile"
+    root.mkdir(parents=True)
+    db = sqlite3.connect(root / "profile.db")
+    db.executescript(
+        """
+        CREATE TABLE conversation_map (
+            public_id TEXT PRIMARY KEY,
+            hermes_session_id TEXT NOT NULL UNIQUE,
+            title_override TEXT,
+            pinned INTEGER NOT NULL DEFAULT 0,
+            archived INTEGER NOT NULL DEFAULT 0,
+            last_read_message_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            deleted_at TEXT
+        );
+        INSERT INTO conversation_map (
+            public_id, hermes_session_id, created_at, updated_at
+        ) VALUES ('conv_existing', 'session-existing', 'now', 'now');
+        """
+    )
+    db.close()
+
+    store = ProfileStore(tmp_path)
+    store.initialize()
+    with store.connect() as conn:
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(conversation_map)")
+        }
+    assert "reasoning_effort" in columns
+    assert store.conversation("conv_existing")["reasoning_effort"] is None
+    store.update_conversation("conv_existing", {"reasoning_effort": "xhigh"})
+    assert store.conversation("conv_existing")["reasoning_effort"] == "xhigh"

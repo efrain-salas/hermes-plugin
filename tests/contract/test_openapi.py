@@ -33,6 +33,23 @@ def test_generated_contract_is_current_and_complete():
         "listScheduledTaskRuns",
         "getScheduledRun",
     } <= operations
+    schemas = document["components"]["schemas"]
+    assert schemas["ReasoningEffort"]["enum"] == [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    ]
+    assert (
+        document["paths"]["/p/{profile}/v1/mobile/models"]["get"]["responses"]["200"][
+            "content"
+        ]["application/json"]["schema"]["$ref"]
+        == "#/components/schemas/ModelsResponse"
+    )
 
 
 def test_every_error_response_uses_common_envelope():

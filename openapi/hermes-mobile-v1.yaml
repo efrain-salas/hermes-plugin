@@ -326,8 +326,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: true
+              $ref: '#/components/schemas/ConversationCreateInput'
   /p/{profile}/v1/mobile/conversations/{conversation_id}:
     get:
       operationId: getConversation
@@ -386,8 +385,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: true
+              $ref: '#/components/schemas/ConversationPatchInput'
     delete:
       operationId: deleteConversation
       parameters:
@@ -1162,7 +1160,11 @@ paths:
           type: string
       responses:
         '200':
-          description: Success
+          description: Provider model catalog and profile defaults
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelsResponse'
         '400':
           $ref: '#/components/responses/MobileError'
         '401':
@@ -1282,3 +1284,107 @@ components:
           format: date-time
         data:
           type: object
+    ReasoningEffort:
+      type: string
+      enum:
+      - none
+      - minimal
+      - low
+      - medium
+      - high
+      - xhigh
+      - max
+      - ultra
+    ModelReasoning:
+      type: object
+      required:
+      - supported
+      - can_disable
+      - efforts
+      properties:
+        supported:
+          type: boolean
+        can_disable:
+          type:
+          - boolean
+          - 'null'
+        efforts:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReasoningEffort'
+    ModelInfo:
+      type: object
+      required:
+      - id
+      - name
+      - reasoning
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        reasoning:
+          $ref: '#/components/schemas/ModelReasoning'
+    ModelsResponse:
+      type: object
+      required:
+      - items
+      - default
+      - default_reasoning_effort
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelInfo'
+        default:
+          type:
+          - string
+          - 'null'
+        default_reasoning_effort:
+          anyOf:
+          - $ref: '#/components/schemas/ReasoningEffort'
+          - type: 'null'
+    ConversationCreateInput:
+      type: object
+      additionalProperties: false
+      properties:
+        title:
+          type:
+          - string
+          - 'null'
+          maxLength: 200
+        model:
+          type:
+          - string
+          - 'null'
+          maxLength: 200
+        reasoning_effort:
+          anyOf:
+          - $ref: '#/components/schemas/ReasoningEffort'
+          - type: 'null'
+    ConversationPatchInput:
+      type: object
+      additionalProperties: false
+      properties:
+        title:
+          type:
+          - string
+          - 'null'
+          maxLength: 200
+        archived:
+          type:
+          - boolean
+          - 'null'
+        pinned:
+          type:
+          - boolean
+          - 'null'
+        model:
+          type:
+          - string
+          - 'null'
+          maxLength: 200
+        reasoning_effort:
+          anyOf:
+          - $ref: '#/components/schemas/ReasoningEffort'
+          - type: 'null'

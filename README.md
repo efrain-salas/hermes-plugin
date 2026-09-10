@@ -89,6 +89,23 @@ Cuando `public_base_url` está configurada, la URI incluye también el host y la
 emparejamiento escaneando el QR sin pedir al usuario que copie una dirección. Los clientes antiguos
 pueden ignorar ese parámetro adicional.
 
+## Modelos y razonamiento
+
+`GET /p/{profile}/v1/mobile/models` devuelve el catálogo real del proveedor
+activo. Cada modelo incluye `reasoning.supported`, `reasoning.can_disable` y
+los esfuerzos seleccionables (`none`, `minimal`, `low`, `medium`, `high`,
+`xhigh`, `max`, `ultra`). `default` y `default_reasoning_effort` reflejan las
+preferencias efectivas del perfil; un esfuerzo nulo significa que se usa el
+valor predeterminado del proveedor.
+
+Al crear una conversación, `model` y `reasoning_effort` fijan esos valores para
+la conversación y actualizan a la vez `model.default` y
+`agent.reasoning_effort` del perfil. Sólo se modifica una preferencia cuando su
+campo aparece en la petición; `reasoning_effort: null` elimina la preferencia
+global explícita. Los mismos campos en `PATCH /conversations/{id}` cambian
+únicamente esa conversación y nunca alteran el perfil. En un `PATCH`, enviar
+`reasoning_effort: null` elimina el override de la conversación.
+
 ## Hub de tareas programadas
 
 La API móvil proyecta el CRON nativo de Hermes en `/v1/mobile/scheduled-tasks`. Hermes sigue siendo
