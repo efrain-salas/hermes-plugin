@@ -155,3 +155,46 @@ def test_deleting_scheduled_task_removes_runs_and_keeps_tombstone(tmp_path):
         ).fetchone()
     assert journal["operation"] == "deleted"
     assert json.loads(journal["payload_json"])["deleted_at"] == deleted["deleted_at"]
+
+
+def test_inbox_is_durable_deduplicated_filterable_and_journaled(tmp_path):
+    store = ProfileStore(tmp_path)
+    store.initialize()
+    unread, created = store.create_inbox_item(
+        kind="gateway.restarted",
+        severity="info",
+        title="Gateway reiniciado",
+        body="Hermes vuelve a estar disponible.",
+        source_type="gateway",
+        source_id="boot-1",
+        dedupe_key="gateway.restarted:boot-1",
+    )
+    replay, replay_created = store.create_inbox_item(
+        kind="gateway.restarted",
+        severity="info",
+        title="Duplicado",
+        body="No debe insertarse.",
+        source_type="gateway",
+        source_id="boot-1",
+        dedupe_key="gateway.restarted:boot-1",
+    )
+    assert created is True and replay_created is False
+    assert replay["public_id"] == unread["public_id"]
+
+    store.mark_inbox_read(unread["public_id"])
+    read_rows, unread_count = store.list_inbox(
+        limit=10, offset=0, unread=False, kind="gateway"
+    )
+    unread_rows, _ = store.list_inbox(
+        limit=10, offset=0, unread=True, kind="gateway"
+    )
+    assert [row["public_id"] for row in read_rows] == [unread["public_id"]]
+    assert unread_rows == [] and unread_count == 0
+
+    with store.connect() as connection:
+        operations = connection.execute(
+            "SELECT operation FROM sync_journal "
+            "WHERE entity_type='inbox_item' AND entity_id=? ORDER BY sequence",
+            (unread["public_id"],),
+        ).fetchall()
+    assert [row["operation"] for row in operations] == ["created", "updated"]

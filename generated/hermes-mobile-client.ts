@@ -8,8 +8,19 @@ export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "
 export interface ModelReasoning { supported: boolean; can_disable: boolean | null; efforts: ReasoningEffort[]; }
 export interface ModelInfo { id: string; name: string; reasoning: ModelReasoning; }
 export interface ModelsResponse { items: ModelInfo[]; default: string | null; default_reasoning_effort: ReasoningEffort | null; }
+export interface SyncChange { type: string; entity: Record<string, Json>; id: string; }
+export interface SyncResponse { changes: SyncChange[]; next_cursor: string; has_more: boolean; server_time: string; }
 export interface ConversationCreateInput { title?: string | null; model?: string | null; reasoning_effort?: ReasoningEffort | null; }
 export interface ConversationPatchInput extends ConversationCreateInput { archived?: boolean | null; pinned?: boolean | null; }
+export type InboxSeverity = "info" | "warning" | "error" | "action_required";
+export type InboxActionType = "answer_approval" | "open_conversation" | "create_conversation" | "reply";
+export interface InboxAction { type: InboxActionType; conversation_id?: string; run_id?: string; approval_id?: string; decisions?: string[]; }
+export interface InboxItem { id: string; kind: string; severity: InboxSeverity; title: string; body: string; source: { type: string; id: string | null }; conversation_id: string | null; context: Record<string, Json>; actions: InboxAction[]; unread: boolean; resolved: boolean; occurred_at: string; read_at: string | null; resolved_at: string | null; updated_at: string; }
+export interface InboxPage { items: InboxItem[]; next_cursor: string | null; has_more: boolean; unread_count: number; }
+export interface InboxConversationInput { title?: string | null; }
+export interface InboxReplyInput { client_message_id: string; input: Array<{ type: "text"; text: string } | { type: "attachment"; attachment_id: string }>; conversation_title?: string | null; }
+export interface RunAccepted { run_id: string; conversation_id: string; user_message_id: string | null; status: string; events_url: string; }
+export interface InboxReadAllResult { updated: number; }
 export interface RequestOptions { body?: unknown; query?: Record<string, string | number | boolean | undefined>; idempotencyKey?: string; signal?: AbortSignal; }
 export interface StreamOptions extends RequestOptions { lastEventId?: string; }
 
@@ -84,6 +95,12 @@ export class HermesMobileClient {
   steerRun(run_id: string, options: RequestOptions = {}): Promise<unknown> { return this.request("POST", this.path("/p/{profile}/v1/mobile/runs/{run_id}/steer", { profile: this.profile, run_id: run_id }), options); }
   answerApproval(run_id: string, approval_id: string, options: RequestOptions = {}): Promise<unknown> { return this.request("POST", this.path("/p/{profile}/v1/mobile/runs/{run_id}/approvals/{approval_id}", { profile: this.profile, run_id: run_id, approval_id: approval_id }), options); }
   retryRun(run_id: string, options: RequestOptions = {}): Promise<unknown> { return this.request("POST", this.path("/p/{profile}/v1/mobile/runs/{run_id}/retry", { profile: this.profile, run_id: run_id }), options); }
+  listInbox(options: RequestOptions = {}): Promise<InboxPage> { return this.request<InboxPage>("GET", this.path("/p/{profile}/v1/mobile/inbox", { profile: this.profile }), options); }
+  readAllInbox(options: RequestOptions = {}): Promise<InboxReadAllResult> { return this.request<InboxReadAllResult>("POST", this.path("/p/{profile}/v1/mobile/inbox/read-all", { profile: this.profile }), options); }
+  getInboxItem(inbox_item_id: string, options: RequestOptions = {}): Promise<InboxItem> { return this.request<InboxItem>("GET", this.path("/p/{profile}/v1/mobile/inbox/{inbox_item_id}", { profile: this.profile, inbox_item_id: inbox_item_id }), options); }
+  readInboxItem(inbox_item_id: string, options: RequestOptions = {}): Promise<InboxItem> { return this.request<InboxItem>("POST", this.path("/p/{profile}/v1/mobile/inbox/{inbox_item_id}/read", { profile: this.profile, inbox_item_id: inbox_item_id }), options); }
+  createInboxConversation(inbox_item_id: string, options: RequestOptions = {}): Promise<unknown> { return this.request("POST", this.path("/p/{profile}/v1/mobile/inbox/{inbox_item_id}/conversation", { profile: this.profile, inbox_item_id: inbox_item_id }), options); }
+  replyToInboxItem(inbox_item_id: string, options: RequestOptions = {}): Promise<RunAccepted> { return this.request<RunAccepted>("POST", this.path("/p/{profile}/v1/mobile/inbox/{inbox_item_id}/reply", { profile: this.profile, inbox_item_id: inbox_item_id }), options); }
   listScheduledTasks(options: RequestOptions = {}): Promise<unknown> { return this.request("GET", this.path("/p/{profile}/v1/mobile/scheduled-tasks", { profile: this.profile }), options); }
   getScheduledTask(scheduled_task_id: string, options: RequestOptions = {}): Promise<unknown> { return this.request("GET", this.path("/p/{profile}/v1/mobile/scheduled-tasks/{scheduled_task_id}", { profile: this.profile, scheduled_task_id: scheduled_task_id }), options); }
   patchScheduledTask(scheduled_task_id: string, options: RequestOptions = {}): Promise<unknown> { return this.request("PATCH", this.path("/p/{profile}/v1/mobile/scheduled-tasks/{scheduled_task_id}", { profile: this.profile, scheduled_task_id: scheduled_task_id }), options); }
@@ -102,5 +119,5 @@ export class HermesMobileClient {
   retryAttachment(attachment_id: string, options: RequestOptions = {}): Promise<unknown> { return this.request("POST", this.path("/p/{profile}/v1/mobile/attachments/{attachment_id}/retry", { profile: this.profile, attachment_id: attachment_id }), options); }
   listModels(options: RequestOptions = {}): Promise<ModelsResponse> { return this.request<ModelsResponse>("GET", this.path("/p/{profile}/v1/mobile/models", { profile: this.profile }), options); }
   listToolsets(options: RequestOptions = {}): Promise<unknown> { return this.request("GET", this.path("/p/{profile}/v1/mobile/toolsets", { profile: this.profile }), options); }
-  sync(options: RequestOptions = {}): Promise<unknown> { return this.request("GET", this.path("/p/{profile}/v1/mobile/sync", { profile: this.profile }), options); }
+  sync(options: RequestOptions = {}): Promise<SyncResponse> { return this.request<SyncResponse>("GET", this.path("/p/{profile}/v1/mobile/sync", { profile: this.profile }), options); }
 }

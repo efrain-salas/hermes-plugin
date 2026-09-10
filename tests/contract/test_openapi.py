@@ -21,7 +21,7 @@ def test_generated_contract_is_current_and_complete():
         for path in document["paths"].values()
         for operation in path.values()
     }
-    assert len(operations) == 45
+    assert len(operations) == 51
     assert {
         "pair",
         "createRun",
@@ -32,6 +32,8 @@ def test_generated_contract_is_current_and_complete():
         "listScheduledTasks",
         "listScheduledTaskRuns",
         "getScheduledRun",
+        "listInbox",
+        "replyToInboxItem",
     } <= operations
     schemas = document["components"]["schemas"]
     assert schemas["ReasoningEffort"]["enum"] == [
@@ -50,6 +52,31 @@ def test_generated_contract_is_current_and_complete():
         ]["application/json"]["schema"]["$ref"]
         == "#/components/schemas/ModelsResponse"
     )
+    assert (
+        document["paths"]["/p/{profile}/v1/mobile/sync"]["get"]["responses"]["200"]
+        ["content"]["application/json"]["schema"]["$ref"]
+        == "#/components/schemas/SyncResponse"
+    )
+    assert schemas["SyncChange"]["required"] == ["type", "entity", "id"]
+    inbox_list = document["paths"]["/p/{profile}/v1/mobile/inbox"]["get"]
+    assert {parameter["name"] for parameter in inbox_list["parameters"]} >= {
+        "unread",
+        "kind",
+        "limit",
+        "cursor",
+    }
+    inbox_reply = document["paths"][
+        "/p/{profile}/v1/mobile/inbox/{inbox_item_id}/reply"
+    ]["post"]
+    assert "202" in inbox_reply["responses"] and "200" not in inbox_reply["responses"]
+    assert any(
+        parameter["name"] == "Idempotency-Key" and parameter["required"]
+        for parameter in inbox_reply["parameters"]
+    )
+    generated_client = (ROOT / "generated" / "hermes-mobile-client.ts").read_text()
+    assert "sync(options: RequestOptions = {}): Promise<SyncResponse>" in generated_client
+    assert "replyToInboxItem(" in generated_client
+    assert "): Promise<RunAccepted>" in generated_client
 
 
 def test_every_error_response_uses_common_envelope():

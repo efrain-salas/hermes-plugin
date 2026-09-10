@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import types
@@ -406,6 +407,49 @@ async def test_loopback_network_error_is_typed():
         await client.capabilities("default")
     assert error.value.code == "gateway_unavailable" and error.value.retryable is True
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_preloads_profiles_with_active_mobile_devices(tmp_path):
+    class Facade:
+        def __init__(self):
+            self.reconciled = asyncio.Event()
+
+        async def start(self):
+            pass
+
+        async def close(self):
+            pass
+
+        async def list_scheduled_tasks(self, profile, include_disabled=False):
+            assert profile == "mujer"
+            assert include_disabled is True
+            self.reconciled.set()
+            return {"jobs": []}
+
+    facade = Facade()
+    runtime = MobileRuntime(
+        MobileConfig(default_home=tmp_path, push=PushConfig(enabled=False)), facade
+    )
+    runtime.control.initialize()
+    pairing = runtime.control.create_pairing("mujer", "Mujer", 600)
+    runtime.control.consume_pairing(
+        "mujer",
+        pairing["token"],
+        {
+            "installation_id": "installation-preload",
+            "name": "Test phone",
+            "platform": "ios",
+        },
+        ("conversations:read",),
+    )
+
+    await runtime.start()
+    try:
+        assert "mujer" in runtime._stores
+        await asyncio.wait_for(facade.reconciled.wait(), timeout=1)
+    finally:
+        await runtime.close()
 
 
 @pytest.mark.asyncio

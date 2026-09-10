@@ -68,6 +68,24 @@ ENDPOINTS = [
         "answerApproval",
     ),
     ("post", "/p/{profile}/v1/mobile/runs/{run_id}/retry", "retryRun"),
+    ("get", "/p/{profile}/v1/mobile/inbox", "listInbox"),
+    ("post", "/p/{profile}/v1/mobile/inbox/read-all", "readAllInbox"),
+    ("get", "/p/{profile}/v1/mobile/inbox/{inbox_item_id}", "getInboxItem"),
+    (
+        "post",
+        "/p/{profile}/v1/mobile/inbox/{inbox_item_id}/read",
+        "readInboxItem",
+    ),
+    (
+        "post",
+        "/p/{profile}/v1/mobile/inbox/{inbox_item_id}/conversation",
+        "createInboxConversation",
+    ),
+    (
+        "post",
+        "/p/{profile}/v1/mobile/inbox/{inbox_item_id}/reply",
+        "replyToInboxItem",
+    ),
     ("get", "/p/{profile}/v1/mobile/scheduled-tasks", "listScheduledTasks"),
     (
         "get",
@@ -168,6 +186,8 @@ def openapi() -> dict:
             "resumeScheduledTask",
             "runScheduledTask",
             "readScheduledRun",
+            "readInboxItem",
+            "readAllInbox",
         }:
             content_type = (
                 "multipart/form-data"
@@ -191,12 +211,116 @@ def openapi() -> dict:
             item["requestBody"]["content"]["application/json"]["schema"] = {
                 "$ref": f"#/components/schemas/{schema_name}"
             }
+        if operation == "createInboxConversation":
+            item["requestBody"]["content"]["application/json"]["schema"] = {
+                "$ref": "#/components/schemas/InboxConversationInput"
+            }
+        if operation == "replyToInboxItem":
+            item["requestBody"]["content"]["application/json"]["schema"] = {
+                "$ref": "#/components/schemas/InboxReplyInput"
+            }
+            item["parameters"].append(
+                {
+                    "name": "Idempotency-Key",
+                    "in": "header",
+                    "required": True,
+                    "schema": {"type": "string", "minLength": 1},
+                }
+            )
+            item["responses"].pop("200")
+            item["responses"]["202"] = {
+                "description": "Reply accepted as an asynchronous run",
+                "content": {
+                    "application/json": {
+                        "schema": {"$ref": "#/components/schemas/RunAccepted"}
+                    }
+                },
+            }
+            item["responses"]["409"] = {
+                "$ref": "#/components/responses/MobileError"
+            }
+        if operation == "createInboxConversation":
+            item["responses"]["200"]["description"] = "Existing linked conversation"
+            item["responses"]["201"] = {"description": "Conversation created and linked"}
+        if operation == "readAllInbox":
+            item["responses"]["200"] = {
+                "description": "Unread items marked as read",
+                "content": {
+                    "application/json": {
+                        "schema": {"$ref": "#/components/schemas/InboxReadAllResult"}
+                    }
+                },
+            }
+        if operation in {"listInbox", "getInboxItem", "readInboxItem"}:
+            item["responses"]["200"] = {
+                "description": "Unified durable activity",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": (
+                                "#/components/schemas/InboxPage"
+                                if operation == "listInbox"
+                                else "#/components/schemas/InboxItem"
+                            )
+                        }
+                    }
+                },
+            }
+        if operation == "listInbox":
+            item["parameters"].extend(
+                [
+                    {
+                        "name": "unread",
+                        "in": "query",
+                        "required": False,
+                        "description": "true returns unread items; false returns read items",
+                        "schema": {"type": "boolean"},
+                    },
+                    {
+                        "name": "kind",
+                        "in": "query",
+                        "required": False,
+                        "description": "Exact activity kind or dotted-prefix family",
+                        "schema": {
+                            "type": "string",
+                            "maxLength": 100,
+                            "pattern": "^[a-z0-9_.-]+$",
+                        },
+                    },
+                    {
+                        "name": "limit",
+                        "in": "query",
+                        "required": False,
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 100,
+                            "default": 30,
+                        },
+                    },
+                    {
+                        "name": "cursor",
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "string"},
+                    },
+                ]
+            )
         if operation == "listModels":
             item["responses"]["200"] = {
                 "description": "Provider model catalog and profile defaults",
                 "content": {
                     "application/json": {
                         "schema": {"$ref": "#/components/schemas/ModelsResponse"}
+                    }
+                },
+            }
+        if operation == "sync":
+            item["responses"]["200"] = {
+                "description": "Incremental changes after the supplied cursor",
+                "content": {
+                    "application/json": {
+                        "schema": {"$ref": "#/components/schemas/SyncResponse"}
                     }
                 },
             }
@@ -328,6 +452,33 @@ def openapi() -> dict:
                         },
                     },
                 },
+                "SyncChange": {
+                    "type": "object",
+                    "required": ["type", "entity", "id"],
+                    "properties": {
+                        "type": {"type": "string"},
+                        "entity": {"type": "object", "additionalProperties": True},
+                        "id": {"type": "string"},
+                    },
+                },
+                "SyncResponse": {
+                    "type": "object",
+                    "required": [
+                        "changes",
+                        "next_cursor",
+                        "has_more",
+                        "server_time",
+                    ],
+                    "properties": {
+                        "changes": {
+                            "type": "array",
+                            "items": {"$ref": "#/components/schemas/SyncChange"},
+                        },
+                        "next_cursor": {"type": "string"},
+                        "has_more": {"type": "boolean"},
+                        "server_time": {"type": "string", "format": "date-time"},
+                    },
+                },
                 "ConversationCreateInput": {
                     "type": "object",
                     "additionalProperties": False,
@@ -358,6 +509,179 @@ def openapi() -> dict:
                         },
                     },
                 },
+                "InboxAction": {
+                    "type": "object",
+                    "required": ["type"],
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": [
+                                "answer_approval",
+                                "open_conversation",
+                                "create_conversation",
+                                "reply",
+                            ],
+                        },
+                        "conversation_id": {"type": "string"},
+                        "run_id": {"type": "string"},
+                        "approval_id": {"type": "string"},
+                        "decisions": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": [
+                                    "allow_once",
+                                    "allow_session",
+                                    "always_allow",
+                                    "deny",
+                                ],
+                            },
+                        },
+                    },
+                },
+                "InboxItem": {
+                    "type": "object",
+                    "required": [
+                        "id",
+                        "kind",
+                        "severity",
+                        "title",
+                        "body",
+                        "source",
+                        "conversation_id",
+                        "context",
+                        "actions",
+                        "unread",
+                        "resolved",
+                        "occurred_at",
+                        "read_at",
+                        "resolved_at",
+                        "updated_at",
+                    ],
+                    "properties": {
+                        "id": {"type": "string"},
+                        "kind": {"type": "string"},
+                        "severity": {
+                            "type": "string",
+                            "enum": ["info", "warning", "error", "action_required"],
+                        },
+                        "title": {"type": "string"},
+                        "body": {"type": "string"},
+                        "source": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["type", "id"],
+                            "properties": {
+                                "type": {"type": "string"},
+                                "id": {"type": ["string", "null"]},
+                            },
+                        },
+                        "conversation_id": {"type": ["string", "null"]},
+                        "context": {"type": "object"},
+                        "actions": {
+                            "type": "array",
+                            "items": {"$ref": "#/components/schemas/InboxAction"},
+                        },
+                        "unread": {"type": "boolean"},
+                        "resolved": {"type": "boolean"},
+                        "occurred_at": {"type": "string", "format": "date-time"},
+                        "read_at": {"type": ["string", "null"], "format": "date-time"},
+                        "resolved_at": {"type": ["string", "null"], "format": "date-time"},
+                        "updated_at": {"type": "string", "format": "date-time"},
+                    },
+                },
+                "InboxPage": {
+                    "type": "object",
+                    "required": ["items", "has_more", "unread_count"],
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": {"$ref": "#/components/schemas/InboxItem"},
+                        },
+                        "next_cursor": {"type": ["string", "null"]},
+                        "has_more": {"type": "boolean"},
+                        "unread_count": {"type": "integer"},
+                    },
+                },
+                "InboxConversationInput": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "title": {"type": ["string", "null"], "maxLength": 200}
+                    },
+                },
+                "RunInputBlock": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["type", "text"],
+                            "properties": {
+                                "type": {"const": "text"},
+                                "text": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 100000,
+                                },
+                            },
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["type", "attachment_id"],
+                            "properties": {
+                                "type": {"const": "attachment"},
+                                "attachment_id": {"type": "string"},
+                            },
+                        },
+                    ]
+                },
+                "InboxReplyInput": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["client_message_id", "input"],
+                    "properties": {
+                        "client_message_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                        },
+                        "conversation_title": {
+                            "type": ["string", "null"],
+                            "maxLength": 200,
+                        },
+                        "input": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 20,
+                            "items": {"$ref": "#/components/schemas/RunInputBlock"},
+                        },
+                    },
+                },
+                "RunAccepted": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "run_id",
+                        "conversation_id",
+                        "user_message_id",
+                        "status",
+                        "events_url",
+                    ],
+                    "properties": {
+                        "run_id": {"type": "string"},
+                        "conversation_id": {"type": "string"},
+                        "user_message_id": {"type": ["string", "null"]},
+                        "status": {"type": "string"},
+                        "events_url": {"type": "string"},
+                    },
+                },
+                "InboxReadAllResult": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["updated"],
+                    "properties": {"updated": {"type": "integer", "minimum": 0}},
+                },
             },
         },
     }
@@ -373,8 +697,19 @@ export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "
 export interface ModelReasoning { supported: boolean; can_disable: boolean | null; efforts: ReasoningEffort[]; }
 export interface ModelInfo { id: string; name: string; reasoning: ModelReasoning; }
 export interface ModelsResponse { items: ModelInfo[]; default: string | null; default_reasoning_effort: ReasoningEffort | null; }
+export interface SyncChange { type: string; entity: Record<string, Json>; id: string; }
+export interface SyncResponse { changes: SyncChange[]; next_cursor: string; has_more: boolean; server_time: string; }
 export interface ConversationCreateInput { title?: string | null; model?: string | null; reasoning_effort?: ReasoningEffort | null; }
 export interface ConversationPatchInput extends ConversationCreateInput { archived?: boolean | null; pinned?: boolean | null; }
+export type InboxSeverity = "info" | "warning" | "error" | "action_required";
+export type InboxActionType = "answer_approval" | "open_conversation" | "create_conversation" | "reply";
+export interface InboxAction { type: InboxActionType; conversation_id?: string; run_id?: string; approval_id?: string; decisions?: string[]; }
+export interface InboxItem { id: string; kind: string; severity: InboxSeverity; title: string; body: string; source: { type: string; id: string | null }; conversation_id: string | null; context: Record<string, Json>; actions: InboxAction[]; unread: boolean; resolved: boolean; occurred_at: string; read_at: string | null; resolved_at: string | null; updated_at: string; }
+export interface InboxPage { items: InboxItem[]; next_cursor: string | null; has_more: boolean; unread_count: number; }
+export interface InboxConversationInput { title?: string | null; }
+export interface InboxReplyInput { client_message_id: string; input: Array<{ type: "text"; text: string } | { type: "attachment"; attachment_id: string }>; conversation_title?: string | null; }
+export interface RunAccepted { run_id: string; conversation_id: string; user_message_id: string | null; status: string; events_url: string; }
+export interface InboxReadAllResult { updated: number; }
 export interface RequestOptions { body?: unknown; query?: Record<string, string | number | boolean | undefined>; idempotencyKey?: string; signal?: AbortSignal; }
 export interface StreamOptions extends RequestOptions { lastEventId?: string; }
 
@@ -445,6 +780,26 @@ def typescript() -> str:
             if operation == "listModels":
                 lines.append(
                     f'  {operation}({", ".join(args)}): Promise<ModelsResponse> {{ return this.request<ModelsResponse>("{method.upper()}", this.path("{path}", {{ {", ".join(param_map)} }}), options); }}'
+                )
+            elif operation == "sync":
+                lines.append(
+                    f'  {operation}({", ".join(args)}): Promise<SyncResponse> {{ return this.request<SyncResponse>("{method.upper()}", this.path("{path}", {{ {", ".join(param_map)} }}), options); }}'
+                )
+            elif operation == "listInbox":
+                lines.append(
+                    f'  {operation}({", ".join(args)}): Promise<InboxPage> {{ return this.request<InboxPage>("{method.upper()}", this.path("{path}", {{ {", ".join(param_map)} }}), options); }}'
+                )
+            elif operation in {"getInboxItem", "readInboxItem"}:
+                lines.append(
+                    f'  {operation}({", ".join(args)}): Promise<InboxItem> {{ return this.request<InboxItem>("{method.upper()}", this.path("{path}", {{ {", ".join(param_map)} }}), options); }}'
+                )
+            elif operation == "replyToInboxItem":
+                lines.append(
+                    f'  {operation}({", ".join(args)}): Promise<RunAccepted> {{ return this.request<RunAccepted>("{method.upper()}", this.path("{path}", {{ {", ".join(param_map)} }}), options); }}'
+                )
+            elif operation == "readAllInbox":
+                lines.append(
+                    f'  {operation}({", ".join(args)}): Promise<InboxReadAllResult> {{ return this.request<InboxReadAllResult>("{method.upper()}", this.path("{path}", {{ {", ".join(param_map)} }}), options); }}'
                 )
             else:
                 lines.append(

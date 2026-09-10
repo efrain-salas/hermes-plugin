@@ -124,6 +124,55 @@ Un destino externo solicitado expresamente se conserva y se muestra en `delivery
 descubrimiento de historial existente no reproduce notificaciones ni llena conversaciones antiguas;
 las ejecuciones siguen apareciendo como no leídas en el hub.
 
+## Bandeja unificada de actividad
+
+`GET /p/{profile}/v1/mobile/inbox` es la fuente durable para avisos que antes dependían de un
+canal de mensajería: ciclo de vida del Gateway, fallos de persistencia detectados al arrancar,
+respuestas terminadas o fallidas, aprobaciones y resultados programados. Admite `unread=true`
+(pendientes), `unread=false` (leídos),
+`kind=<tipo o prefijo>`, `limit` y `cursor`, y
+devuelve `unread_count` global además de las acciones válidas para cada elemento.
+
+```http
+GET  /p/{profile}/v1/mobile/inbox
+GET  /p/{profile}/v1/mobile/inbox/{inbox_item_id}
+POST /p/{profile}/v1/mobile/inbox/{inbox_item_id}/read
+POST /p/{profile}/v1/mobile/inbox/read-all
+POST /p/{profile}/v1/mobile/inbox/{inbox_item_id}/conversation
+POST /p/{profile}/v1/mobile/inbox/{inbox_item_id}/reply
+```
+
+La bandeja no convierte los avisos técnicos en mensajes falsos de una conversación. Un elemento
+puede apuntar a su conversación de origen; si no existe, `conversation` la crea de forma estable.
+`reply` hace ambas cosas en una sola operación, exige `Idempotency-Key`, acepta el mismo `input` que
+un run normal y pasa al agente el contexto estructurado del aviso como instrucciones de sólo lectura.
+Los valores procedentes de ejecuciones se marcan expresamente como datos no confiables.
+
+Los cambios de bandeja también se publican en el `sync_journal`, de modo que `/sync` entrega eventos
+`inbox_item.created` e `inbox_item.updated`. El push contiene `inbox_item_id` para abrir directamente
+el elemento, pero SQLite y `/sync` siguen siendo la fuente de verdad.
+
+El listado evita incluir resultados extensos; `GET /inbox/{id}` devuelve el contexto completo del
+elemento. Marcar un resultado programado como leído, desde la bandeja o desde el hub, mantiene ambos
+estados sincronizados.
+
+Durante el cierre del adaptador HTTP se confirma `gateway.stopping` antes de cerrar SQLite. En el
+siguiente arranque se transforma en un único `gateway.restarted` con la duración de la interrupción;
+un arranque sin parada previa aparece como `gateway.started`. No se afirma que una tarea fue
+interrumpida si Hermes no dispone de esa evidencia. Como el API forma parte del Gateway, una caída
+prolongada no puede emitir push por sí misma: el cliente debe mostrar el estado sin conexión, y una
+alerta durante toda la caída requiere un monitor externo al contenedor.
+
+Preferencias push nuevas:
+
+- `system_lifecycle`: arranques y reinicios.
+- `system_critical`: diagnósticos persistentes críticos, como un `state.db` no disponible.
+
+Para retirar Telegram, cambia primero los cron con `deliver=telegram` a `deliver=local`. Sus outputs
+seguirán apareciendo en la bandeja y en el hub programado. Sustituye también cualquier
+`hermes send --to telegram` por un productor local de actividad antes de eliminar las credenciales y
+variables `TELEGRAM_HOME_CHANNEL*`/`TELEGRAM_CRON_THREAD_ID`.
+
 ## Datos, backup y recuperación
 
 - Control compartido: `~/.hermes/plugin-data/hermes-mobile/control.db`.

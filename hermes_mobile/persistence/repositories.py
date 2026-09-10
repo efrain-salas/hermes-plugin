@@ -661,6 +661,8 @@ class ControlStore(SQLiteStore):
                 "scheduled_task.completed": "scheduled_task_completed",
                 "scheduled_task.failed": "scheduled_task_failed",
                 "scheduled_task.unknown": "scheduled_task_failed",
+                "system.lifecycle": "system_lifecycle",
+                "system.critical": "system_critical",
             }.get(kind)
             for device in devices:
                 prefs = json.loads(device["notification_preferences_json"] or "{}")
@@ -682,6 +684,19 @@ class ControlStore(SQLiteStore):
                     ),
                 ).rowcount
             return count
+
+    def profile_ids(self) -> list[str]:
+        """Return profiles that currently have at least one non-revoked device."""
+        with self.connect() as conn:
+            return [
+                str(row["profile_id"])
+                for row in conn.execute(
+                    "SELECT DISTINCT u.profile_id FROM users u "
+                    "JOIN devices d ON d.user_id=u.id "
+                    "WHERE u.status='active' AND d.revoked_at IS NULL "
+                    "ORDER BY u.profile_id"
+                )
+            ]
 
     def pending_push(self, limit: int = 20) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -1109,6 +1124,287 @@ class ProfileStore(SQLiteStore):
             return None
 
         return self.transaction(_update)
+
+    def create_inbox_item(
+        self,
+        *,
+        kind: str,
+        severity: str,
+        title: str,
+        body: str,
+        source_type: str,
+        source_id: str | None,
+        dedupe_key: str,
+        occurred_at: str | None = None,
+        conversation_id: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Create one durable activity item, idempotently by ``dedupe_key``."""
+        now = iso()
+
+        def _create(conn: sqlite3.Connection) -> tuple[dict[str, Any], bool]:
+            existing = conn.execute(
+                "SELECT * FROM inbox_items WHERE dedupe_key=?", (dedupe_key,)
+            ).fetchone()
+            if existing:
+                return dict(existing), False
+            public_id = new_id("inb")
+            conn.execute(
+                "INSERT INTO inbox_items("
+                "public_id,kind,severity,title,body,source_type,source_id,"
+                "conversation_id,context_json,dedupe_key,occurred_at,created_at,updated_at"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    public_id,
+                    kind,
+                    severity,
+                    title,
+                    body,
+                    source_type,
+                    source_id,
+                    conversation_id,
+                    json_dump(context or {}),
+                    dedupe_key,
+                    occurred_at or now,
+                    now,
+                    now,
+                ),
+            )
+            self._journal_conn(
+                conn,
+                "inbox_item",
+                public_id,
+                "created",
+                {"id": public_id, "kind": kind},
+            )
+            row = conn.execute(
+                "SELECT * FROM inbox_items WHERE public_id=?", (public_id,)
+            ).fetchone()
+            return dict(row), True
+
+        return self.transaction(_create)
+
+    def inbox_item(self, public_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM inbox_items WHERE public_id=?", (public_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def inbox_item_by_source(
+        self, source_type: str, source_id: str
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM inbox_items WHERE source_type=? AND source_id=? "
+                "ORDER BY occurred_at DESC LIMIT 1",
+                (source_type, source_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def latest_unresolved_gateway_stop(self) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM inbox_items "
+                "WHERE kind='gateway.stopping' AND resolved_at IS NULL "
+                "ORDER BY occurred_at DESC LIMIT 1"
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_inbox(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        unread: bool | None = None,
+        kind: str | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        where: list[str] = []
+        values: list[Any] = []
+        if unread is not None:
+            where.append("read_at IS NULL" if unread else "read_at IS NOT NULL")
+        if kind:
+            where.append("(kind=? OR kind LIKE ?)")
+            values.extend((kind, f"{kind}.%"))
+        clause = " WHERE " + " AND ".join(where) if where else ""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM inbox_items"
+                + clause
+                + " ORDER BY occurred_at DESC, public_id DESC LIMIT ? OFFSET ?",
+                (*values, limit, offset),
+            ).fetchall()
+            unread = conn.execute(
+                "SELECT COUNT(*) AS count FROM inbox_items WHERE read_at IS NULL"
+            ).fetchone()
+            return [dict(row) for row in rows], int(unread["count"])
+
+    def update_inbox_item(
+        self, public_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        allowed = {
+            "kind",
+            "severity",
+            "title",
+            "body",
+            "conversation_id",
+            "context_json",
+            "read_at",
+            "resolved_at",
+        }
+        clean = {key: value for key, value in fields.items() if key in allowed}
+        if not clean:
+            return self.inbox_item(public_id)
+        clean["updated_at"] = iso()
+
+        def _update(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            conn.execute(
+                "UPDATE inbox_items SET "
+                + ",".join(f"{key}=?" for key in clean)
+                + " WHERE public_id=?",
+                (*clean.values(), public_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM inbox_items WHERE public_id=?", (public_id,)
+            ).fetchone()
+            if row:
+                self._journal_conn(
+                    conn,
+                    "inbox_item",
+                    public_id,
+                    "updated",
+                    {"id": public_id, **clean},
+                )
+                return dict(row)
+            return None
+
+        return self.transaction(_update)
+
+    def mark_inbox_read(
+        self, public_id: str, at: str | None = None
+    ) -> dict[str, Any] | None:
+        read_at = at or iso()
+
+        def _mark(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute(
+                "SELECT * FROM inbox_items WHERE public_id=?", (public_id,)
+            ).fetchone()
+            if not row:
+                return None
+            if row["read_at"] is None:
+                conn.execute(
+                    "UPDATE inbox_items SET read_at=?,updated_at=? WHERE public_id=?",
+                    (read_at, read_at, public_id),
+                )
+                self._journal_conn(
+                    conn,
+                    "inbox_item",
+                    public_id,
+                    "updated",
+                    {"id": public_id, "read_at": read_at},
+                )
+            if row["source_type"] == "scheduled_run" and row["source_id"]:
+                scheduled = conn.execute(
+                    "SELECT task_id,read_at FROM scheduled_run_state WHERE public_id=?",
+                    (row["source_id"],),
+                ).fetchone()
+                if scheduled and scheduled["read_at"] is None:
+                    conn.execute(
+                        "UPDATE scheduled_run_state SET read_at=?,updated_at=? "
+                        "WHERE public_id=?",
+                        (read_at, read_at, row["source_id"]),
+                    )
+                    self._journal_conn(
+                        conn,
+                        "scheduled_run",
+                        str(row["source_id"]),
+                        "updated",
+                        {
+                            "id": row["source_id"],
+                            "task_id": scheduled["task_id"],
+                            "read_at": read_at,
+                        },
+                    )
+            updated = conn.execute(
+                "SELECT * FROM inbox_items WHERE public_id=?", (public_id,)
+            ).fetchone()
+            return dict(updated)
+
+        return self.transaction(_mark)
+
+    def mark_inbox_source_read(
+        self, source_type: str, source_id: str, at: str | None = None
+    ) -> int:
+        read_at = at or iso()
+
+        def _mark(conn: sqlite3.Connection) -> int:
+            rows = conn.execute(
+                "SELECT public_id FROM inbox_items "
+                "WHERE source_type=? AND source_id=? AND read_at IS NULL",
+                (source_type, source_id),
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    "UPDATE inbox_items SET read_at=?,updated_at=? WHERE public_id=?",
+                    (read_at, read_at, row["public_id"]),
+                )
+                self._journal_conn(
+                    conn,
+                    "inbox_item",
+                    str(row["public_id"]),
+                    "updated",
+                    {"id": row["public_id"], "read_at": read_at},
+                )
+            return len(rows)
+
+        return self.transaction(_mark)
+
+    def mark_all_inbox_read(self, at: str | None = None) -> int:
+        read_at = at or iso()
+
+        def _mark(conn: sqlite3.Connection) -> int:
+            rows = conn.execute(
+                "SELECT public_id,source_type,source_id FROM inbox_items "
+                "WHERE read_at IS NULL"
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    "UPDATE inbox_items SET read_at=?,updated_at=? WHERE public_id=?",
+                    (read_at, read_at, row["public_id"]),
+                )
+                self._journal_conn(
+                    conn,
+                    "inbox_item",
+                    str(row["public_id"]),
+                    "updated",
+                    {"id": row["public_id"], "read_at": read_at},
+                )
+                if row["source_type"] == "scheduled_run" and row["source_id"]:
+                    scheduled = conn.execute(
+                        "SELECT task_id,read_at FROM scheduled_run_state "
+                        "WHERE public_id=?",
+                        (row["source_id"],),
+                    ).fetchone()
+                    if scheduled and scheduled["read_at"] is None:
+                        conn.execute(
+                            "UPDATE scheduled_run_state SET read_at=?,updated_at=? "
+                            "WHERE public_id=?",
+                            (read_at, read_at, row["source_id"]),
+                        )
+                        self._journal_conn(
+                            conn,
+                            "scheduled_run",
+                            str(row["source_id"]),
+                            "updated",
+                            {
+                                "id": row["source_id"],
+                                "task_id": scheduled["task_id"],
+                                "read_at": read_at,
+                            },
+                        )
+            return len(rows)
+
+        return self.transaction(_mark)
 
     def create_run(
         self, conversation_id: str, hermes_run_id: str, client_message_id: str | None

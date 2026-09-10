@@ -38,6 +38,8 @@ class Notifications(StrictModel):
     approval_required: bool = True
     scheduled_task_completed: bool = True
     scheduled_task_failed: bool = True
+    system_lifecycle: bool = True
+    system_critical: bool = True
 
 
 class DeviceUpdate(StrictModel):
@@ -97,6 +99,14 @@ class AttachmentInput(StrictModel):
 class RunCreate(StrictModel):
     client_message_id: str = Field(min_length=1, max_length=128)
     input: list[TextInput | AttachmentInput] = Field(min_length=1, max_length=20)
+
+
+class InboxConversationCreate(StrictModel):
+    title: str | None = Field(default=None, max_length=200)
+
+
+class InboxReply(RunCreate):
+    conversation_title: str | None = Field(default=None, max_length=200)
 
 
 class SteerRequest(StrictModel):

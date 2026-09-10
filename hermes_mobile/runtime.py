@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+from datetime import datetime
 from pathlib import Path
 
 from .config import MobileConfig
@@ -10,9 +13,10 @@ from .hermes.api_client import HermesAPIClient
 from .hermes.cron_reader import NativeCronReader
 from .hermes.event_mapper import map_event
 from .hermes.profile_preferences import NativeProfilePreferences
+from .ids import new_id
 from .lifecycle import TaskSupervisor
 from .notifications.worker import PushWorker
-from .persistence.repositories import ControlStore, ProfileStore, iso
+from .persistence.repositories import ControlStore, ProfileStore, iso, json_dump
 from .security.tokens import SecretBox, TokenManager
 
 logger = logging.getLogger("hermes_mobile")
@@ -43,6 +47,7 @@ class MobileRuntime:
         self.supervisor = TaskSupervisor()
         self.push_worker = PushWorker(self.control, self.box, config.push)
         self._stores: dict[str, ProfileStore] = {}
+        self.boot_id = new_id("boot")
         self.started = False
 
     def profile_home(self, profile: str) -> Path:
@@ -68,11 +73,177 @@ class MobileRuntime:
         if self.started:
             return
         await asyncio.to_thread(self.control.initialize)
+        for profile in await asyncio.to_thread(self.control.profile_ids):
+            await asyncio.to_thread(self.store, profile)
         await self.facade.start()
         self.started = True
         if self.config.push.enabled:
             self.supervisor.create(self.push_worker.run(), name="push-outbox")
         self.supervisor.create(self._reconcile_runs(), name="run-reconciler")
+
+    async def record_gateway_started(self, runner: object | None = None) -> None:
+        """Persist a cold start or close the latest durable shutdown incident."""
+        now = iso()
+        for profile in await asyncio.to_thread(self.control.profile_ids):
+            store = self.store(profile)
+            pending = await asyncio.to_thread(store.latest_unresolved_gateway_stop)
+            if pending:
+                try:
+                    started = datetime.fromisoformat(
+                        str(pending["occurred_at"]).replace("Z", "+00:00")
+                    )
+                    duration = max(
+                        0,
+                        int(
+                            (
+                                datetime.fromisoformat(now.replace("Z", "+00:00"))
+                                - started
+                            ).total_seconds()
+                        ),
+                    )
+                except (TypeError, ValueError):
+                    duration = 0
+                context = json.loads(pending.get("context_json") or "{}")
+                context.update(
+                    {
+                        "started_at": now,
+                        "downtime_seconds": duration,
+                        "boot_id": self.boot_id,
+                    }
+                )
+                item = await asyncio.to_thread(
+                    store.update_inbox_item,
+                    pending["public_id"],
+                    {
+                        "kind": "gateway.restarted",
+                        "severity": "info",
+                        "title": "Gateway reiniciado",
+                        "body": (
+                            f"Hermes vuelve a estar disponible tras {duration} segundos."
+                            if duration
+                            else "Hermes vuelve a estar disponible."
+                        ),
+                        "context_json": json_dump(context),
+                        "resolved_at": now,
+                    },
+                )
+            else:
+                item, _created = await asyncio.to_thread(
+                    store.create_inbox_item,
+                    kind="gateway.started",
+                    severity="info",
+                    title="Gateway disponible",
+                    body="Hermes está conectado y preparado.",
+                    source_type="gateway",
+                    source_id=self.boot_id,
+                    dedupe_key=f"gateway.started:{self.boot_id}",
+                    occurred_at=now,
+                    context={"boot_id": self.boot_id, "pid": os.getpid()},
+                )
+            if item:
+                await asyncio.to_thread(
+                    self.control.enqueue_push,
+                    profile,
+                    "system.lifecycle",
+                    f"gateway-online:{item['public_id']}",
+                    {
+                        "title": item["title"],
+                        "body": item["body"],
+                        "data": {
+                            "type": item["kind"],
+                            "profile": profile,
+                            "inbox_item_id": item["public_id"],
+                        },
+                    },
+                )
+        if getattr(runner, "_session_db_init_error", None):
+            await self.record_system_event(
+                kind="system.persistence",
+                severity="error",
+                title="Persistencia de sesiones no disponible",
+                body=(
+                    "Hermes puede responder, pero quizá no conserve el historial. "
+                    "Ejecuta `hermes doctor` para obtener un diagnóstico saneado."
+                ),
+                source_type="gateway_diagnostic",
+                source_id=self.boot_id,
+                dedupe_key=f"system.persistence:{self.boot_id}",
+                context={"component": "state.db", "boot_id": self.boot_id},
+                push_kind="system.critical",
+            )
+
+    async def record_system_event(
+        self,
+        *,
+        kind: str,
+        severity: str,
+        title: str,
+        body: str,
+        source_type: str,
+        source_id: str | None,
+        dedupe_key: str,
+        context: dict | None = None,
+        push_kind: str = "system.critical",
+    ) -> None:
+        """Fan out one sanitized system event to profiles with active devices."""
+        for profile in await asyncio.to_thread(self.control.profile_ids):
+            store = self.store(profile)
+            item, created = await asyncio.to_thread(
+                store.create_inbox_item,
+                kind=kind,
+                severity=severity,
+                title=title,
+                body=body,
+                source_type=source_type,
+                source_id=source_id,
+                dedupe_key=dedupe_key,
+                context=context,
+            )
+            if not created:
+                continue
+            await asyncio.to_thread(
+                self.control.enqueue_push,
+                profile,
+                push_kind,
+                item["public_id"],
+                {
+                    "title": title,
+                    "body": body,
+                    "data": {
+                        "type": kind,
+                        "profile": profile,
+                        "inbox_item_id": item["public_id"],
+                    },
+                },
+            )
+
+    async def record_gateway_stopping(self, runner: object | None = None) -> None:
+        """Commit the shutdown notice before the API adapter disappears."""
+        now = iso()
+        restart = bool(getattr(runner, "_restart_requested", False))
+        reason = str(getattr(runner, "_exit_reason", "") or "")[:500]
+        for profile in await asyncio.to_thread(self.control.profile_ids):
+            store = self.store(profile)
+            await asyncio.to_thread(
+                store.create_inbox_item,
+                kind="gateway.stopping",
+                severity="warning",
+                title="Gateway reiniciándose" if restart else "Gateway apagándose",
+                body=(
+                    "Hermes ha iniciado un reinicio controlado."
+                    if restart
+                    else "Hermes ha iniciado una parada controlada."
+                ),
+                source_type="gateway",
+                source_id=self.boot_id,
+                dedupe_key=f"gateway.stopping:{self.boot_id}",
+                occurred_at=now,
+                context={
+                    "boot_id": self.boot_id,
+                    "restart_requested": restart,
+                    **({"reason": reason} if reason else {}),
+                },
+            )
 
     async def close(self) -> None:
         await self.supervisor.close()
@@ -166,18 +337,47 @@ class MobileRuntime:
         if not run:
             return
         kind = status if status == "approval.requested" else f"run.{status}"
-        payload = {
-            "title": "Hermes",
-            "body": "Se necesita tu aprobación"
+        source_type = "approval" if approval_id else "run"
+        source_id = approval_id or run_id
+        title = "Aprobación necesaria" if approval_id else "Hermes"
+        body = (
+            "Se necesita tu aprobación"
             if status == "approval.requested"
             else "La respuesta está lista"
             if status == "completed"
-            else "El turno ha fallado",
+            else "El turno ha fallado"
+        )
+        item, _created = await asyncio.to_thread(
+            store.create_inbox_item,
+            kind=kind,
+            severity=(
+                "action_required"
+                if status == "approval.requested"
+                else "error"
+                if status == "failed"
+                else "info"
+            ),
+            title=title,
+            body=body,
+            source_type=source_type,
+            source_id=source_id,
+            dedupe_key=f"{kind}:{source_id}",
+            conversation_id=run["conversation_id"],
+            context={
+                "run_id": run_id,
+                "conversation_id": run["conversation_id"],
+                **({"approval_id": approval_id} if approval_id else {}),
+            },
+        )
+        payload = {
+            "title": title,
+            "body": body,
             "data": {
                 "type": kind,
                 "profile": profile,
                 "conversation_id": run["conversation_id"],
                 "run_id": run_id,
+                "inbox_item_id": item["public_id"],
                 **({"approval_id": approval_id} if approval_id else {}),
             },
         }
@@ -239,7 +439,6 @@ class MobileRuntime:
 
     async def _reconcile_runs(self) -> None:
         while True:
-            await asyncio.sleep(5)
             for profile, store in list(self._stores.items()):
                 for run in await asyncio.to_thread(store.nonterminal_runs):
                     try:
@@ -268,6 +467,7 @@ class MobileRuntime:
                         if status in {"completed", "failed"} and previous != status:
                             await self._notify(profile, run["public_id"], status)
                 await self.reconcile_scheduled_tasks(profile)
+            await asyncio.sleep(5)
 
     async def reconcile_scheduled_tasks(self, profile: str) -> None:
         """Project native Hermes cron state into the mobile hub."""
@@ -343,6 +543,44 @@ class MobileRuntime:
                 )
                 if execution.get("status") not in {"completed", "failed", "unknown"}:
                     continue
+                status = str(execution.get("status"))
+                output = await asyncio.to_thread(
+                    self.cron_reader.execution_output,
+                    self.profile_home(profile),
+                    job_id,
+                    execution,
+                )
+                result_text = output or str(execution.get("error") or "")
+                compact_result = " ".join(result_text.split())
+                inbox_item, _inbox_created = await asyncio.to_thread(
+                    store.create_inbox_item,
+                    kind=f"scheduled_run.{status}",
+                    severity="info" if status == "completed" else "error",
+                    title=str(job.get("name") or "Tarea programada"),
+                    body=(
+                        compact_result[:240]
+                        if compact_result
+                        else "El resultado programado está listo."
+                        if status == "completed"
+                        else "La tarea programada ha fallado."
+                    ),
+                    source_type="scheduled_run",
+                    source_id=run["public_id"],
+                    dedupe_key=f"scheduled_run:{execution_id}",
+                    occurred_at=str(
+                        execution.get("finished_at")
+                        or execution.get("claimed_at")
+                        or iso()
+                    ),
+                    conversation_id=task.get("origin_conversation_id"),
+                    context={
+                        "scheduled_task_id": task["public_id"],
+                        "scheduled_run_id": run["public_id"],
+                        "task_name": str(job.get("name") or job_id),
+                        "status": status,
+                        **({"result": result_text[:20_000]} if result_text else {}),
+                    },
+                )
                 if existing_task is None:
                     # Backfill is visible and unread in the hub, but never
                     # replays stale push notifications or chat deliveries.
@@ -367,13 +605,7 @@ class MobileRuntime:
                     and conversation
                     and not run.get("conversation_delivered_at")
                 ):
-                    output = await asyncio.to_thread(
-                        self.cron_reader.execution_output,
-                        self.profile_home(profile),
-                        job_id,
-                        execution,
-                    )
-                    text = output or str(execution.get("error") or "")
+                    text = result_text
                     if text.strip():
                         try:
                             await asyncio.to_thread(
@@ -393,7 +625,6 @@ class MobileRuntime:
                         {"conversation_delivered_at": iso()},
                     )
 
-                status = str(execution.get("status"))
                 await asyncio.to_thread(
                     self.control.enqueue_push,
                     profile,
@@ -409,6 +640,7 @@ class MobileRuntime:
                             "profile": profile,
                             "scheduled_task_id": task["public_id"],
                             "scheduled_run_id": run["public_id"],
+                            "inbox_item_id": inbox_item["public_id"],
                         },
                     },
                 )

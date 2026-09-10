@@ -722,6 +722,227 @@ paths:
           $ref: '#/components/responses/MobileError'
       security:
       - mobileBearer: []
+  /p/{profile}/v1/mobile/inbox:
+    get:
+      operationId: listInbox
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: unread
+        in: query
+        required: false
+        description: true returns unread items; false returns read items
+        schema:
+          type: boolean
+      - name: kind
+        in: query
+        required: false
+        description: Exact activity kind or dotted-prefix family
+        schema:
+          type: string
+          maxLength: 100
+          pattern: ^[a-z0-9_.-]+$
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 30
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Unified durable activity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InboxPage'
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/inbox/read-all:
+    post:
+      operationId: readAllInbox
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Unread items marked as read
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InboxReadAllResult'
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/inbox/{inbox_item_id}:
+    get:
+      operationId: getInboxItem
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: inbox_item_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Unified durable activity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InboxItem'
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/inbox/{inbox_item_id}/read:
+    post:
+      operationId: readInboxItem
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: inbox_item_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Unified durable activity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InboxItem'
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/inbox/{inbox_item_id}/conversation:
+    post:
+      operationId: createInboxConversation
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: inbox_item_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Existing linked conversation
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+        '201':
+          description: Conversation created and linked
+      security:
+      - mobileBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InboxConversationInput'
+  /p/{profile}/v1/mobile/inbox/{inbox_item_id}/reply:
+    post:
+      operationId: replyToInboxItem
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: inbox_item_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+      responses:
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+        '202':
+          description: Reply accepted as an asynchronous run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunAccepted'
+        '409':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InboxReplyInput'
   /p/{profile}/v1/mobile/scheduled-tasks:
     get:
       operationId: listScheduledTasks
@@ -1208,7 +1429,11 @@ paths:
           type: string
       responses:
         '200':
-          description: Success
+          description: Incremental changes after the supplied cursor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncResponse'
         '400':
           $ref: '#/components/responses/MobileError'
         '401':
@@ -1344,6 +1569,39 @@ components:
           anyOf:
           - $ref: '#/components/schemas/ReasoningEffort'
           - type: 'null'
+    SyncChange:
+      type: object
+      required:
+      - type
+      - entity
+      - id
+      properties:
+        type:
+          type: string
+        entity:
+          type: object
+          additionalProperties: true
+        id:
+          type: string
+    SyncResponse:
+      type: object
+      required:
+      - changes
+      - next_cursor
+      - has_more
+      - server_time
+      properties:
+        changes:
+          type: array
+          items:
+            $ref: '#/components/schemas/SyncChange'
+        next_cursor:
+          type: string
+        has_more:
+          type: boolean
+        server_time:
+          type: string
+          format: date-time
     ConversationCreateInput:
       type: object
       additionalProperties: false
@@ -1388,3 +1646,212 @@ components:
           anyOf:
           - $ref: '#/components/schemas/ReasoningEffort'
           - type: 'null'
+    InboxAction:
+      type: object
+      required:
+      - type
+      properties:
+        type:
+          type: string
+          enum:
+          - answer_approval
+          - open_conversation
+          - create_conversation
+          - reply
+        conversation_id:
+          type: string
+        run_id:
+          type: string
+        approval_id:
+          type: string
+        decisions:
+          type: array
+          items:
+            type: string
+            enum:
+            - allow_once
+            - allow_session
+            - always_allow
+            - deny
+    InboxItem:
+      type: object
+      required:
+      - id
+      - kind
+      - severity
+      - title
+      - body
+      - source
+      - conversation_id
+      - context
+      - actions
+      - unread
+      - resolved
+      - occurred_at
+      - read_at
+      - resolved_at
+      - updated_at
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+        severity:
+          type: string
+          enum:
+          - info
+          - warning
+          - error
+          - action_required
+        title:
+          type: string
+        body:
+          type: string
+        source:
+          type: object
+          additionalProperties: false
+          required:
+          - type
+          - id
+          properties:
+            type:
+              type: string
+            id:
+              type:
+              - string
+              - 'null'
+        conversation_id:
+          type:
+          - string
+          - 'null'
+        context:
+          type: object
+        actions:
+          type: array
+          items:
+            $ref: '#/components/schemas/InboxAction'
+        unread:
+          type: boolean
+        resolved:
+          type: boolean
+        occurred_at:
+          type: string
+          format: date-time
+        read_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        resolved_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    InboxPage:
+      type: object
+      required:
+      - items
+      - has_more
+      - unread_count
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/InboxItem'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+        has_more:
+          type: boolean
+        unread_count:
+          type: integer
+    InboxConversationInput:
+      type: object
+      additionalProperties: false
+      properties:
+        title:
+          type:
+          - string
+          - 'null'
+          maxLength: 200
+    RunInputBlock:
+      oneOf:
+      - type: object
+        additionalProperties: false
+        required:
+        - type
+        - text
+        properties:
+          type:
+            const: text
+          text:
+            type: string
+            minLength: 1
+            maxLength: 100000
+      - type: object
+        additionalProperties: false
+        required:
+        - type
+        - attachment_id
+        properties:
+          type:
+            const: attachment
+          attachment_id:
+            type: string
+    InboxReplyInput:
+      type: object
+      additionalProperties: false
+      required:
+      - client_message_id
+      - input
+      properties:
+        client_message_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        conversation_title:
+          type:
+          - string
+          - 'null'
+          maxLength: 200
+        input:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/RunInputBlock'
+    RunAccepted:
+      type: object
+      additionalProperties: false
+      required:
+      - run_id
+      - conversation_id
+      - user_message_id
+      - status
+      - events_url
+      properties:
+        run_id:
+          type: string
+        conversation_id:
+          type: string
+        user_message_id:
+          type:
+          - string
+          - 'null'
+        status:
+          type: string
+        events_url:
+          type: string
+    InboxReadAllResult:
+      type: object
+      additionalProperties: false
+      required:
+      - updated
+      properties:
+        updated:
+          type: integer
+          minimum: 0

@@ -17,6 +17,141 @@ async def _conversation(client, headers, title="Trip"):
     return await response.json()
 
 
+async def test_unified_inbox_can_open_conversation_and_reply(
+    client, runtime, fake_facade, auth
+):
+    _, headers = auth
+    store = runtime.store("default")
+    item, created = store.create_inbox_item(
+        kind="gateway.restarted",
+        severity="info",
+        title="Gateway reiniciado",
+        body="Hermes vuelve a estar disponible.",
+        source_type="gateway",
+        source_id="boot-test",
+        dedupe_key="gateway.restarted:boot-test",
+        context={"downtime_seconds": 12, "result": "detalle extenso"},
+    )
+    assert created is True
+
+    rejected = await client.post(
+        f"/p/default/v1/mobile/inbox/{item['public_id']}/reply",
+        headers=headers,
+        json={
+            "client_message_id": "client-without-idempotency",
+            "input": [{"type": "text", "text": "¿Qué pasó?"}],
+        },
+    )
+    assert rejected.status == 400
+    assert store.inbox_item(item["public_id"])["conversation_id"] is None
+
+    listing = await client.get(
+        "/p/default/v1/mobile/inbox?unread=true&kind=gateway", headers=headers
+    )
+    assert listing.status == 200
+    page = await listing.json()
+    assert page["unread_count"] == 1
+    assert page["items"][0]["id"] == item["public_id"]
+    assert page["items"][0]["actions"][0]["type"] == "create_conversation"
+    assert "result" not in page["items"][0]["context"]
+    invalid_unread = await client.get(
+        "/p/default/v1/mobile/inbox?unread=1", headers=headers
+    )
+    assert invalid_unread.status == 400
+    invalid_kind = await client.get(
+        "/p/default/v1/mobile/inbox?kind=gateway%25", headers=headers
+    )
+    assert invalid_kind.status == 400
+
+    opened = await client.post(
+        f"/p/default/v1/mobile/inbox/{item['public_id']}/conversation",
+        headers=headers,
+        json={"title": "Investigar reinicio"},
+    )
+    assert opened.status == 201
+    conversation = await opened.json()
+    replay = await client.post(
+        f"/p/default/v1/mobile/inbox/{item['public_id']}/conversation",
+        headers=headers,
+        json={},
+    )
+    assert replay.status == 200
+    assert (await replay.json())["id"] == conversation["id"]
+
+    reply = await client.post(
+        f"/p/default/v1/mobile/inbox/{item['public_id']}/reply",
+        headers={**headers, "Idempotency-Key": "reply-to-restart"},
+        json={
+            "client_message_id": "client-inbox-reply-1",
+            "input": [{"type": "text", "text": "¿Por qué ocurrió?"}],
+        },
+    )
+    assert reply.status == 202, await reply.text()
+    accepted = await reply.json()
+    assert accepted["conversation_id"] == conversation["id"]
+    native_run = next(iter(fake_facade.runs.values()))
+    assert "Gateway reiniciado" in native_run["instructions"]
+    assert "dato no confiable" in native_run["instructions"]
+
+    detail = await client.get(
+        f"/p/default/v1/mobile/inbox/{item['public_id']}", headers=headers
+    )
+    assert detail.status == 200
+    detail_body = await detail.json()
+    assert detail_body["unread"] is False
+    assert detail_body["context"]["result"] == "detalle extenso"
+    assert detail_body["conversation_id"] == conversation["id"]
+    assert detail_body["actions"][0]["type"] == "open_conversation"
+
+    second, _ = store.create_inbox_item(
+        kind="system.persistence",
+        severity="error",
+        title="Persistencia degradada",
+        body="No se pueden guardar sesiones.",
+        source_type="gateway",
+        source_id="persistence-test",
+        dedupe_key="system.persistence:test",
+    )
+    marked = await client.post(
+        "/p/default/v1/mobile/inbox/read-all", headers=headers
+    )
+    assert marked.status == 200 and (await marked.json())["updated"] >= 1
+    assert store.inbox_item(second["public_id"])["read_at"] is not None
+
+    sync = await client.get("/p/default/v1/mobile/sync?cursor=sync_0", headers=headers)
+    changes = (await sync.json())["changes"]
+    assert any(change["type"] == "inbox_item.created" for change in changes)
+
+
+async def test_gateway_shutdown_is_correlated_with_the_next_start(runtime, auth):
+    auth  # Ensure the profile has an active paired device.
+
+    class RestartingRunner:
+        _restart_requested = True
+        _exit_reason = "requested"
+        _session_db_init_error = "sensitive database error"
+
+    await runtime.record_gateway_stopping(RestartingRunner())
+    store = runtime.store("default")
+    pending = store.latest_unresolved_gateway_stop()
+    assert pending is not None
+    assert pending["kind"] == "gateway.stopping"
+
+    runtime.boot_id = "boot-after-restart"
+    await runtime.record_gateway_started(RestartingRunner())
+    correlated = store.inbox_item(pending["public_id"])
+    assert correlated["kind"] == "gateway.restarted"
+    assert correlated["resolved_at"] is not None
+    assert json.loads(correlated["context_json"])["boot_id"] == "boot-after-restart"
+    assert store.latest_unresolved_gateway_stop() is None
+    persistence = store.inbox_item_by_source(
+        "gateway_diagnostic", "boot-after-restart"
+    )
+    assert persistence is not None
+    assert persistence["kind"] == "system.persistence"
+    assert "sensitive database error" not in persistence["body"]
+
+
 async def test_system_auth_devices_refresh_and_logout(client, runtime, auth):
     paired, headers = auth
     health = await client.get("/p/default/v1/mobile/health")
@@ -683,7 +818,7 @@ async def test_messages_mapping_filters_and_model_error(client, fake_facade, aut
 
 
 async def test_scheduled_task_hub_uses_native_cron_and_optional_conversation(
-    client, runtime, fake_facade, auth
+    client, runtime, fake_facade, auth, monkeypatch
 ):
     _, headers = auth
     conversation = await _conversation(client, headers, "Scheduled origin")
@@ -745,6 +880,14 @@ async def test_scheduled_task_hub_uses_native_cron_and_optional_conversation(
     }
     fake_facade.executions[("default", job_id)].insert(0, fresh_execution)
     fake_facade.outputs[(job_id, "exec-fresh")] = "Resultado nuevo"
+    queued_pushes = []
+    original_enqueue_push = runtime.control.enqueue_push
+
+    def capture_push(profile, kind, dedupe_key, payload):
+        queued_pushes.append((profile, kind, dedupe_key, payload))
+        return original_enqueue_push(profile, kind, dedupe_key, payload)
+
+    monkeypatch.setattr(runtime.control, "enqueue_push", capture_push)
     await runtime.reconcile_scheduled_tasks("default")
     assert fake_facade.mirrored_results == [
         (session_id, "[Cron delivery: Informe diario]\nResultado nuevo")
@@ -757,6 +900,17 @@ async def test_scheduled_task_hub_uses_native_cron_and_optional_conversation(
     )
     run_items = (await runs.json())["items"]
     assert [item["status"] for item in run_items] == ["completed", "completed"]
+    assert len(queued_pushes) == 1
+    push_profile, push_kind, _dedupe_key, push_payload = queued_pushes[0]
+    assert push_profile == "default"
+    assert push_kind == "scheduled_task.completed"
+    assert push_payload["data"] == {
+        "type": "scheduled_task.completed",
+        "profile": "default",
+        "scheduled_task_id": task["id"],
+        "scheduled_run_id": run_items[0]["id"],
+        "inbox_item_id": push_payload["data"]["inbox_item_id"],
+    }
     detail = await client.get(
         f"/p/default/v1/mobile/scheduled-runs/{run_items[0]['id']}", headers=headers
     )
@@ -766,6 +920,12 @@ async def test_scheduled_task_hub_uses_native_cron_and_optional_conversation(
         headers=headers,
     )
     assert marked.status == 204
+    inbox_detail = await client.get(
+        f"/p/default/v1/mobile/inbox/{push_payload['data']['inbox_item_id']}",
+        headers=headers,
+    )
+    assert inbox_detail.status == 200
+    assert (await inbox_detail.json())["unread"] is False
 
     patched = await client.patch(
         f"/p/default/v1/mobile/scheduled-tasks/{task['id']}",

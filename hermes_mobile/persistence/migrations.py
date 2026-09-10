@@ -1,5 +1,5 @@
 CONTROL_SCHEMA_VERSION = 2
-PROFILE_SCHEMA_VERSION = 3
+PROFILE_SCHEMA_VERSION = 4
 
 CONTROL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -238,9 +238,32 @@ CREATE TABLE IF NOT EXISTS scheduled_run_state (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS inbox_items (
+    public_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    severity TEXT NOT NULL CHECK(severity IN ('info','warning','error','action_required')),
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    source_id TEXT,
+    conversation_id TEXT REFERENCES conversation_map(public_id),
+    context_json TEXT NOT NULL DEFAULT '{}',
+    dedupe_key TEXT NOT NULL UNIQUE,
+    occurred_at TEXT NOT NULL,
+    read_at TEXT,
+    resolved_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_events_run_sequence ON run_events(run_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_sync_sequence ON sync_journal(sequence);
 CREATE INDEX IF NOT EXISTS idx_attachments_conversation ON attachments(conversation_id, status);
 CREATE INDEX IF NOT EXISTS idx_scheduled_runs_task
     ON scheduled_run_state(task_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_inbox_occurred
+    ON inbox_items(occurred_at DESC, public_id DESC);
+CREATE INDEX IF NOT EXISTS idx_inbox_unread
+    ON inbox_items(read_at, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_inbox_source
+    ON inbox_items(source_type, source_id);
 """
