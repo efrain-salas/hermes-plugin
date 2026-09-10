@@ -20,6 +20,10 @@ class FakeFacade:
         self.sessions: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
         self.messages: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         self.runs: dict[tuple[str, str], dict[str, Any]] = {}
+        self.jobs: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+        self.executions: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+        self.outputs: dict[tuple[str, str], str] = {}
+        self.mirrored_results: list[tuple[str, str]] = []
         self.counter = 0
         self.fail = False
 
@@ -102,6 +106,7 @@ class FakeFacade:
             "status": "queued",
             "idem": idempotency_key,
             "session_id": body.get("session_id"),
+            "instructions": body.get("instructions"),
         }
         return {"run_id": rid, "status": "queued"}
 
@@ -133,6 +138,67 @@ class FakeFacade:
     async def answer_approval(self, profile, run_id, request_id, choice):
         return {"resolved": 1}
 
+    async def list_scheduled_tasks(self, profile, *, include_disabled=True):
+        rows = list(self.jobs[profile].values())
+        if not include_disabled:
+            rows = [row for row in rows if row.get("enabled", True)]
+        return {"jobs": rows}
+
+    async def get_scheduled_task(self, profile, job_id):
+        from hermes_mobile.api.errors import MobileError
+
+        if job_id not in self.jobs[profile]:
+            raise MobileError("not_found", "missing", 404)
+        return {"job": self.jobs[profile][job_id]}
+
+    async def update_scheduled_task(self, profile, job_id, body):
+        self.jobs[profile][job_id].update(body)
+        return {"job": self.jobs[profile][job_id]}
+
+    async def delete_scheduled_task(self, profile, job_id):
+        self.jobs[profile].pop(job_id, None)
+
+    async def pause_scheduled_task(self, profile, job_id):
+        self.jobs[profile][job_id].update(enabled=False, state="paused")
+        return {"job": self.jobs[profile][job_id]}
+
+    async def resume_scheduled_task(self, profile, job_id):
+        self.jobs[profile][job_id].update(enabled=True, state="scheduled")
+        return {"job": self.jobs[profile][job_id]}
+
+    async def run_scheduled_task(self, profile, job_id):
+        self.jobs[profile][job_id]["next_run_at"] = "now"
+        return {"job": self.jobs[profile][job_id]}
+
+    def list_executions(
+        self, _profile_home, job_id, *, limit=50, before_claimed_at=None
+    ):
+        profile = "default" if ("default", job_id) in self.executions else "mujer"
+        rows = self.executions[(profile, job_id)]
+        if before_claimed_at:
+            rows = [row for row in rows if row["claimed_at"] < before_claimed_at]
+        return rows[:limit]
+
+    def get_execution(self, _profile_home, execution_id):
+        for rows in self.executions.values():
+            for row in rows:
+                if row["id"] == execution_id:
+                    return row
+        return None
+
+    def update_job_metadata(self, _profile_home, job_id, updates):
+        for jobs in self.jobs.values():
+            if job_id in jobs:
+                jobs[job_id].update(updates)
+                return jobs[job_id]
+        return None
+
+    def execution_output(self, _profile_home, job_id, execution):
+        return self.outputs.get((job_id, execution["id"]))
+
+    def append_conversation_result(self, _profile_home, session_id, text):
+        self.mirrored_results.append((session_id, text))
+
     async def models(self, profile):
         self._guard()
         return {"data": [{"id": "mock-model"}]}
@@ -157,7 +223,7 @@ async def runtime(tmp_path: Path, fake_facade: FakeFacade):
     config = MobileConfig(
         default_home=tmp_path, push=PushConfig(enabled=False), pairing_ttl_seconds=600
     )
-    value = MobileRuntime(config, facade=fake_facade)  # type: ignore[arg-type]
+    value = MobileRuntime(config, facade=fake_facade, cron_reader=fake_facade)  # type: ignore[arg-type]
     yield value
     if value.started:
         await value.close()

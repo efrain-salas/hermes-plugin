@@ -34,7 +34,7 @@ from ..persistence.repositories import (
     iso,
     json_dump,
 )
-from ..runtime import MobileRuntime
+from ..runtime import SCHEDULED_TASK_INSTRUCTIONS, MobileRuntime
 from ..security.tokens import TokenError
 from .admin import AdminPortal
 from .errors import MobileError, error_response
@@ -48,6 +48,7 @@ from .schemas import (
     ReadRequest,
     RefreshRequest,
     RunCreate,
+    ScheduledTaskPatch,
     SteerRequest,
 )
 
@@ -140,6 +141,66 @@ class MobileAPI:
                 "approvals:write",
             ),
             ("POST", "/runs/{run_id}/retry", self.retry_run, "runs:write"),
+            (
+                "GET",
+                "/scheduled-tasks",
+                self.scheduled_tasks,
+                "conversations:read",
+            ),
+            (
+                "GET",
+                "/scheduled-tasks/{scheduled_task_id}",
+                self.get_scheduled_task,
+                "conversations:read",
+            ),
+            (
+                "PATCH",
+                "/scheduled-tasks/{scheduled_task_id}",
+                self.patch_scheduled_task,
+                "runs:write",
+            ),
+            (
+                "DELETE",
+                "/scheduled-tasks/{scheduled_task_id}",
+                self.delete_scheduled_task,
+                "runs:write",
+            ),
+            (
+                "POST",
+                "/scheduled-tasks/{scheduled_task_id}/pause",
+                self.pause_scheduled_task,
+                "runs:write",
+            ),
+            (
+                "POST",
+                "/scheduled-tasks/{scheduled_task_id}/resume",
+                self.resume_scheduled_task,
+                "runs:write",
+            ),
+            (
+                "POST",
+                "/scheduled-tasks/{scheduled_task_id}/run",
+                self.run_scheduled_task,
+                "runs:write",
+            ),
+            (
+                "GET",
+                "/scheduled-tasks/{scheduled_task_id}/runs",
+                self.scheduled_task_runs,
+                "conversations:read",
+            ),
+            (
+                "GET",
+                "/scheduled-runs/{scheduled_run_id}",
+                self.get_scheduled_run,
+                "conversations:read",
+            ),
+            (
+                "POST",
+                "/scheduled-runs/{scheduled_run_id}/read",
+                self.read_scheduled_run,
+                "conversations:write",
+            ),
             ("GET", "/attachments", self.attachments, "attachments:read"),
             ("POST", "/attachments", self.upload_attachment, "attachments:write"),
             (
@@ -334,6 +395,7 @@ class MobileAPI:
                 "steering": True,
                 "reasoning_summary": True,
                 "sync": True,
+                "scheduled_tasks": True,
                 "supported_mime_types": list(SUPPORTED_MIME_TYPES),
                 "max_file_bytes": self.runtime.config.max_file_bytes,
                 "max_attachments_per_turn": self.runtime.config.max_attachments_per_turn,
@@ -814,6 +876,18 @@ class MobileAPI:
             )
             blocks: list[dict[str, Any]] = []
             content = message.get("content")
+            role = message.get("role")
+            if (
+                role == "user"
+                and isinstance(content, str)
+                and content.startswith("[Cron delivery:")
+                and "\n" in content
+            ):
+                # Hermes mirrors cron results as labelled user rows to preserve
+                # transcript role alternation. Present the copy as an assistant
+                # result in the mobile timeline.
+                role = "assistant"
+                content = content.split("\n", 1)[1]
             if isinstance(content, str) and content:
                 blocks.append({"type": "text", "text": content})
             for call in message.get("tool_calls") or []:
@@ -833,7 +907,7 @@ class MobileAPI:
                     "id": public_id,
                     "conversation_id": row["public_id"],
                     "run_id": None,
-                    "role": message.get("role"),
+                    "role": role,
                     "status": "completed",
                     "content": blocks,
                     "reasoning_summary": None,
@@ -913,6 +987,7 @@ class MobileAPI:
             {
                 "input": "\n\n".join(texts),
                 "session_id": conversation["hermes_session_id"],
+                "instructions": SCHEDULED_TASK_INSTRUCTIONS,
             },
             idem,
         )
@@ -1153,6 +1228,7 @@ class MobileAPI:
             {
                 "input": "Reintenta el último turno fallido manteniendo el contexto de la conversación.",
                 "session_id": conversation["hermes_session_id"],
+                "instructions": SCHEDULED_TASK_INSTRUCTIONS,
             },
             idem,
         )
@@ -1176,6 +1252,354 @@ class MobileAPI:
             new_run["public_id"],
         )
         return self._json(resource, 202)
+
+    async def _scheduled_jobs(self, profile: str) -> list[dict[str, Any]]:
+        await self.runtime.reconcile_scheduled_tasks(profile)
+        payload = await self.runtime.facade.list_scheduled_tasks(
+            profile, include_disabled=True
+        )
+        jobs = [job for job in payload.get("jobs", []) if job.get("id")]
+        return sorted(
+            jobs,
+            key=lambda job: (
+                not bool(job.get("enabled", True)),
+                str(job.get("next_run_at") or "9999"),
+                str(job.get("name") or "").casefold(),
+            ),
+        )
+
+    async def _scheduled_executions(
+        self, profile: str, job_id: str, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        try:
+            return await asyncio.to_thread(
+                self.runtime.cron_reader.list_executions,
+                self.runtime.profile_home(profile),
+                job_id,
+                limit=limit,
+            )
+        except Exception as exc:
+            raise MobileError(
+                "gateway_unavailable",
+                "El historial CRON nativo de Hermes no está disponible.",
+                503,
+                retryable=True,
+            ) from exc
+
+    async def _scheduled_run_resource(
+        self,
+        store: Any,
+        task: dict[str, Any],
+        execution: dict[str, Any],
+        *,
+        result: str | None = None,
+    ) -> dict[str, Any]:
+        state = await asyncio.to_thread(
+            store.ensure_scheduled_run,
+            task["public_id"],
+            str(execution["id"]),
+            str(execution.get("claimed_at") or iso()),
+        )
+        status = str(execution.get("status") or "unknown")
+        return {
+            "id": state["public_id"],
+            "scheduled_task_id": task["public_id"],
+            "status": "queued" if status == "claimed" else status,
+            "source": execution.get("source"),
+            "scheduled_at": execution.get("scheduled_instant"),
+            "created_at": execution.get("claimed_at"),
+            "started_at": execution.get("started_at"),
+            "completed_at": execution.get("finished_at"),
+            "delivery_outcome": execution.get("delivery_outcome"),
+            "unread": state.get("read_at") is None,
+            "error": (
+                {"code": "scheduled_task_failed", "message": execution.get("error")}
+                if execution.get("error")
+                else None
+            ),
+            **({"result": result} if result is not None else {}),
+        }
+
+    async def _scheduled_task_resource(
+        self,
+        profile: str,
+        store: Any,
+        job: dict[str, Any],
+        mapping: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        mapping = mapping or await asyncio.to_thread(
+            store.ensure_scheduled_task, str(job["id"])
+        )
+        executions = await self._scheduled_executions(profile, str(job["id"]), 100)
+        run_resources = [
+            await self._scheduled_run_resource(store, mapping, execution)
+            for execution in executions
+        ]
+        configured = mapping.get("conversation_policy") or "agent"
+        effective = mapping.get("conversation_policy") or (
+            "origin" if job.get("attach_to_session") is True else "hub_only"
+        )
+        external = str(job.get("deliver") or "local")
+        if external in {"local", "origin"} or external.startswith("api_server"):
+            external = None
+        return {
+            "id": mapping["public_id"],
+            "name": job.get("name"),
+            "prompt": job.get("prompt"),
+            "schedule": job.get("schedule"),
+            "schedule_display": job.get("schedule_display"),
+            "enabled": bool(job.get("enabled", True)),
+            "state": job.get("state"),
+            "next_run_at": job.get("next_run_at"),
+            "last_run_at": job.get("last_run_at"),
+            "last_status": job.get("last_status"),
+            "last_error": job.get("last_error"),
+            "delivery": {
+                "primary": "hub",
+                "conversation": {
+                    "mode": configured,
+                    "effective": effective,
+                    "conversation_id": mapping.get("origin_conversation_id"),
+                },
+                "external": external,
+            },
+            "unread_count": sum(1 for run in run_resources if run["unread"]),
+            "latest_run": run_resources[0] if run_resources else None,
+            "created_at": job.get("created_at") or mapping.get("created_at"),
+            "updated_at": mapping.get("updated_at"),
+        }
+
+    async def scheduled_tasks(
+        self, request: web.Request, _subject: dict | None
+    ) -> web.Response:
+        profile = self._profile(request)
+        store = self.runtime.store(profile)
+        limit, offset = self._page_params(request)
+        jobs = await self._scheduled_jobs(profile)
+        state = request.query.get("state")
+        if state:
+            jobs = [job for job in jobs if str(job.get("state")) == state]
+        query = request.query.get("q", "").casefold().strip()
+        if query:
+            jobs = [
+                job
+                for job in jobs
+                if query in str(job.get("name") or "").casefold()
+                or query in str(job.get("prompt") or "").casefold()
+            ]
+        page = jobs[offset : offset + limit + 1]
+        items = [
+            await self._scheduled_task_resource(profile, store, job)
+            for job in page[:limit]
+        ]
+        has_more = len(page) > limit
+        return self._json(
+            {
+                "items": items,
+                "next_cursor": self._cursor(offset + limit) if has_more else None,
+                "has_more": has_more,
+                "unread_count": sum(item["unread_count"] for item in items),
+            }
+        )
+
+    async def _mapped_scheduled_task(
+        self, request: web.Request
+    ) -> tuple[str, Any, dict[str, Any], dict[str, Any]]:
+        profile = self._profile(request)
+        store = self.runtime.store(profile)
+        mapping = await asyncio.to_thread(
+            store.scheduled_task, request.match_info["scheduled_task_id"]
+        )
+        if not mapping:
+            raise MobileError(
+                "scheduled_task_not_found", "Tarea programada no encontrada.", 404
+            )
+        try:
+            payload = await self.runtime.facade.get_scheduled_task(
+                profile, mapping["hermes_job_id"]
+            )
+        except MobileError as exc:
+            if exc.status == 404:
+                await asyncio.to_thread(
+                    store.update_scheduled_task,
+                    mapping["public_id"],
+                    {"deleted_at": iso()},
+                )
+                raise MobileError(
+                    "scheduled_task_not_found", "Tarea programada no encontrada.", 404
+                ) from exc
+            raise
+        return profile, store, mapping, payload["job"]
+
+    async def get_scheduled_task(
+        self, request: web.Request, _subject: dict | None
+    ) -> web.Response:
+        profile, store, mapping, job = await self._mapped_scheduled_task(request)
+        return self._json(
+            await self._scheduled_task_resource(profile, store, job, mapping)
+        )
+
+    async def patch_scheduled_task(
+        self, request: web.Request, _subject: dict | None
+    ) -> web.Response:
+        profile, store, mapping, job = await self._mapped_scheduled_task(request)
+        body = await self._body(request, ScheduledTaskPatch)
+        values = body.model_dump(exclude_unset=True)
+        conversation_delivery = values.pop("conversation_delivery", None)
+        if not values and conversation_delivery is None:
+            raise MobileError("invalid_request", "No hay cambios que aplicar.", 400)
+        if values:
+            payload = await self.runtime.facade.update_scheduled_task(
+                profile, mapping["hermes_job_id"], values
+            )
+            job = payload["job"]
+        if conversation_delivery is not None:
+            if conversation_delivery == "origin" and not mapping.get(
+                "origin_conversation_id"
+            ):
+                raise MobileError(
+                    "conversation_not_found",
+                    "La tarea no tiene una conversación de origen disponible.",
+                    409,
+                )
+            policy = None if conversation_delivery == "agent" else conversation_delivery
+            mapping = await asyncio.to_thread(
+                store.update_scheduled_task,
+                mapping["public_id"],
+                {"conversation_policy": policy},
+            )
+            if conversation_delivery != "agent":
+                updated = await asyncio.to_thread(
+                    self.runtime.cron_reader.update_job_metadata,
+                    self.runtime.profile_home(profile),
+                    mapping["hermes_job_id"],
+                    {"attach_to_session": conversation_delivery == "origin"},
+                )
+                if updated:
+                    job = updated
+        return self._json(
+            await self._scheduled_task_resource(profile, store, job, mapping)
+        )
+
+    async def delete_scheduled_task(
+        self, request: web.Request, _subject: dict | None
+    ) -> web.Response:
+        profile, store, mapping, _job = await self._mapped_scheduled_task(request)
+        await self.runtime.facade.delete_scheduled_task(
+            profile, mapping["hermes_job_id"]
+        )
+        await asyncio.to_thread(
+            store.update_scheduled_task,
+            mapping["public_id"],
+            {"deleted_at": iso()},
+        )
+        return web.Response(status=204)
+
+    async def _scheduled_task_action(
+        self, request: web.Request, action: str
+    ) -> web.Response:
+        profile, store, mapping, _job = await self._mapped_scheduled_task(request)
+        method = getattr(self.runtime.facade, f"{action}_scheduled_task")
+        payload = await method(profile, mapping["hermes_job_id"])
+        status = 202 if action == "run" else 200
+        return self._json(
+            await self._scheduled_task_resource(
+                profile, store, payload["job"], mapping
+            ),
+            status,
+        )
+
+    async def pause_scheduled_task(
+        self, request: web.Request, _subject: dict | None
+    ) -> web.Response:
+        return await self._scheduled_task_action(request, "pause")
+
+    async def resume_scheduled_task(
+        self, request: web.Request, _subject: dict | None
+    ) -> web.Response:
+        return await self._scheduled_task_action(request, "resume")
+
+    async def run_scheduled_task(
+        self, request: web.Request, _subject: dict | None
+    ) -> web.Response:
+        return await self._scheduled_task_action(request, "run")
+
+    async def scheduled_task_runs(
+        self, request: web.Request, _subject: dict | None
+    ) -> web.Response:
+        profile, store, mapping, job = await self._mapped_scheduled_task(request)
+        limit, offset = self._page_params(request)
+        executions = await self._scheduled_executions(
+            profile, str(job["id"]), min(500, offset + limit + 1)
+        )
+        page = executions[offset : offset + limit + 1]
+        items = [
+            await self._scheduled_run_resource(store, mapping, execution)
+            for execution in page[:limit]
+        ]
+        has_more = len(page) > limit
+        return self._json(
+            {
+                "items": items,
+                "next_cursor": self._cursor(offset + limit) if has_more else None,
+                "has_more": has_more,
+            }
+        )
+
+    async def _mapped_scheduled_run(
+        self, request: web.Request
+    ) -> tuple[str, Any, dict[str, Any], dict[str, Any], dict[str, Any]]:
+        profile = self._profile(request)
+        store = self.runtime.store(profile)
+        state = await asyncio.to_thread(
+            store.scheduled_run, request.match_info["scheduled_run_id"]
+        )
+        if not state:
+            raise MobileError(
+                "scheduled_run_not_found", "Ejecución programada no encontrada.", 404
+            )
+        task = await asyncio.to_thread(store.scheduled_task, state["task_id"])
+        if not task:
+            raise MobileError(
+                "scheduled_run_not_found", "Ejecución programada no encontrada.", 404
+            )
+        execution = await asyncio.to_thread(
+            self.runtime.cron_reader.get_execution,
+            self.runtime.profile_home(profile),
+            state["hermes_execution_id"],
+        )
+        if not execution or str(execution.get("job_id")) != task["hermes_job_id"]:
+            raise MobileError(
+                "scheduled_run_not_found", "Ejecución programada no encontrada.", 404
+            )
+        return profile, store, task, state, execution
+
+    async def get_scheduled_run(
+        self, request: web.Request, _subject: dict | None
+    ) -> web.Response:
+        profile, store, task, _state, execution = await self._mapped_scheduled_run(
+            request
+        )
+        result = await asyncio.to_thread(
+            self.runtime.cron_reader.execution_output,
+            self.runtime.profile_home(profile),
+            task["hermes_job_id"],
+            execution,
+        )
+        return self._json(
+            await self._scheduled_run_resource(store, task, execution, result=result)
+        )
+
+    async def read_scheduled_run(
+        self, request: web.Request, _subject: dict | None
+    ) -> web.Response:
+        _profile, store, _task, state, _execution = await self._mapped_scheduled_run(
+            request
+        )
+        await asyncio.to_thread(
+            store.update_scheduled_run, state["public_id"], {"read_at": iso()}
+        )
+        return web.Response(status=204)
 
     async def attachments(
         self, request: web.Request, _subject: dict | None

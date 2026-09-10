@@ -68,6 +68,52 @@ ENDPOINTS = [
         "answerApproval",
     ),
     ("post", "/p/{profile}/v1/mobile/runs/{run_id}/retry", "retryRun"),
+    ("get", "/p/{profile}/v1/mobile/scheduled-tasks", "listScheduledTasks"),
+    (
+        "get",
+        "/p/{profile}/v1/mobile/scheduled-tasks/{scheduled_task_id}",
+        "getScheduledTask",
+    ),
+    (
+        "patch",
+        "/p/{profile}/v1/mobile/scheduled-tasks/{scheduled_task_id}",
+        "patchScheduledTask",
+    ),
+    (
+        "delete",
+        "/p/{profile}/v1/mobile/scheduled-tasks/{scheduled_task_id}",
+        "deleteScheduledTask",
+    ),
+    (
+        "post",
+        "/p/{profile}/v1/mobile/scheduled-tasks/{scheduled_task_id}/pause",
+        "pauseScheduledTask",
+    ),
+    (
+        "post",
+        "/p/{profile}/v1/mobile/scheduled-tasks/{scheduled_task_id}/resume",
+        "resumeScheduledTask",
+    ),
+    (
+        "post",
+        "/p/{profile}/v1/mobile/scheduled-tasks/{scheduled_task_id}/run",
+        "runScheduledTask",
+    ),
+    (
+        "get",
+        "/p/{profile}/v1/mobile/scheduled-tasks/{scheduled_task_id}/runs",
+        "listScheduledTaskRuns",
+    ),
+    (
+        "get",
+        "/p/{profile}/v1/mobile/scheduled-runs/{scheduled_run_id}",
+        "getScheduledRun",
+    ),
+    (
+        "post",
+        "/p/{profile}/v1/mobile/scheduled-runs/{scheduled_run_id}/read",
+        "readScheduledRun",
+    ),
     ("get", "/p/{profile}/v1/mobile/attachments", "listAttachments"),
     ("post", "/p/{profile}/v1/mobile/attachments", "uploadAttachment"),
     ("get", "/p/{profile}/v1/mobile/attachments/{attachment_id}", "getAttachment"),
@@ -118,6 +164,10 @@ def openapi() -> dict:
             "cancelRun",
             "retryRun",
             "retryAttachment",
+            "pauseScheduledTask",
+            "resumeScheduledTask",
+            "runScheduledTask",
+            "readScheduledRun",
         }:
             content_type = (
                 "multipart/form-data"

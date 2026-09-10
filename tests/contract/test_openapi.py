@@ -21,7 +21,7 @@ def test_generated_contract_is_current_and_complete():
         for path in document["paths"].values()
         for operation in path.values()
     }
-    assert len(operations) == 35
+    assert len(operations) == 45
     assert {
         "pair",
         "createRun",
@@ -29,6 +29,9 @@ def test_generated_contract_is_current_and_complete():
         "answerApproval",
         "uploadAttachment",
         "sync",
+        "listScheduledTasks",
+        "listScheduledTaskRuns",
+        "getScheduledRun",
     } <= operations
 
 

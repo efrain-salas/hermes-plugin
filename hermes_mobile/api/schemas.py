@@ -31,6 +31,8 @@ class Notifications(StrictModel):
     turn_completed: bool = True
     turn_failed: bool = True
     approval_required: bool = True
+    scheduled_task_completed: bool = True
+    scheduled_task_failed: bool = True
 
 
 class DeviceUpdate(StrictModel):
@@ -96,3 +98,12 @@ class SteerRequest(StrictModel):
 
 class ApprovalRequest(StrictModel):
     decision: Literal["allow_once", "allow_session", "always_allow", "deny"]
+
+
+class ScheduledTaskPatch(StrictModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    schedule: str | None = Field(default=None, min_length=1, max_length=500)
+    prompt: str | None = Field(default=None, max_length=100_000)
+    skills: list[str] | None = Field(default=None, max_length=50)
+    repeat: int | None = Field(default=None, ge=1)
+    conversation_delivery: Literal["agent", "hub_only", "origin"] | None = None

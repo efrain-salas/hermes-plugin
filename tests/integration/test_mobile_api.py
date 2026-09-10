@@ -142,7 +142,9 @@ async def test_conversation_full_lifecycle_and_idempotency(client, auth):
     ).status == 404
 
 
-async def test_attachment_run_sse_sync_models_and_toolsets(client, runtime, auth):
+async def test_attachment_run_sse_sync_models_and_toolsets(
+    client, runtime, fake_facade, auth
+):
     _, headers = auth
     conversation = await _conversation(client, headers, "Attachment run")
     form = FormData()
@@ -191,6 +193,13 @@ async def test_attachment_run_sse_sync_models_and_toolsets(client, runtime, auth
     )
     assert started.status == 202, await started.text()
     run = await started.json()
+    native_run = next(
+        item
+        for (profile, _run_id), item in fake_facade.runs.items()
+        if profile == "default" and item.get("idem") == "run-one"
+    )
+    assert "deliver='local'" in native_run["instructions"]
+    assert "Nunca uses Telegram" in native_run["instructions"]
     replayed = await client.post(
         f"/p/default/v1/mobile/conversations/{conversation['id']}/runs",
         headers={**headers, "Idempotency-Key": "run-one"},
@@ -493,7 +502,14 @@ async def test_messages_mapping_filters_and_model_error(client, fake_facade, aut
                     "function": {"name": "calculator", "arguments": {"x": 1}},
                 }
             ],
-        }
+        },
+        {
+            "id": "native-cron-mirror",
+            "role": "user",
+            "content": "[Cron delivery: Daily report]\nScheduled answer",
+            "timestamp": 1_788_948_002.0,
+            "token_count": 2,
+        },
     ]
     messages = await client.get(
         f"/p/default/v1/mobile/conversations/{first['id']}/messages", headers=headers
@@ -501,6 +517,8 @@ async def test_messages_mapping_filters_and_model_error(client, fake_facade, aut
     body = await messages.json()
     assert body["items"][0]["content"][0]["text"] == "Answer"
     assert body["items"][0]["content"][1]["type"] == "tool_call"
+    assert body["items"][1]["role"] == "assistant"
+    assert body["items"][1]["content"][0]["text"] == "Scheduled answer"
     invalid_model = await client.patch(
         f"/p/default/v1/mobile/conversations/{first['id']}",
         headers=headers,
@@ -512,3 +530,120 @@ async def test_messages_mapping_filters_and_model_error(client, fake_facade, aut
     )
     page_body = await page.json()
     assert page_body["has_more"] is True and page_body["next_cursor"]
+
+
+async def test_scheduled_task_hub_uses_native_cron_and_optional_conversation(
+    client, runtime, fake_facade, auth
+):
+    _, headers = auth
+    conversation = await _conversation(client, headers, "Scheduled origin")
+    mapping = runtime.store("default").conversation(conversation["id"])
+    session_id = mapping["hermes_session_id"]
+    job_id = "abc123def456"
+    fake_facade.jobs["default"][job_id] = {
+        "id": job_id,
+        "name": "Informe diario",
+        "prompt": "Resume las novedades",
+        "schedule": {"kind": "cron", "expr": "0 8 * * *"},
+        "schedule_display": "0 8 * * *",
+        "enabled": True,
+        "state": "scheduled",
+        "next_run_at": "2026-09-11T08:00:00+02:00",
+        "last_run_at": "2026-09-10T08:00:02+02:00",
+        "last_status": "ok",
+        "deliver": "origin",
+        "attach_to_session": True,
+        "origin": {"platform": "api_server", "chat_id": session_id},
+        "created_at": "2026-09-09T12:00:00+02:00",
+    }
+    old_execution = {
+        "id": "exec-old",
+        "job_id": job_id,
+        "source": "scheduler",
+        "status": "completed",
+        "claimed_at": "2026-09-10T08:00:00+02:00",
+        "started_at": "2026-09-10T08:00:00+02:00",
+        "finished_at": "2026-09-10T08:00:02+02:00",
+        "delivery_outcome": "local",
+        "error": None,
+    }
+    fake_facade.executions[("default", job_id)] = [old_execution]
+    fake_facade.outputs[(job_id, "exec-old")] = "Resultado anterior"
+
+    listing = await client.get("/p/default/v1/mobile/scheduled-tasks", headers=headers)
+    assert listing.status == 200, await listing.text()
+    task = (await listing.json())["items"][0]
+    assert task["delivery"] == {
+        "primary": "hub",
+        "conversation": {
+            "mode": "agent",
+            "effective": "origin",
+            "conversation_id": conversation["id"],
+        },
+        "external": None,
+    }
+    assert fake_facade.jobs["default"][job_id]["deliver"] == "local"
+    assert task["unread_count"] == 1
+    assert fake_facade.mirrored_results == []
+
+    fresh_execution = {
+        **old_execution,
+        "id": "exec-fresh",
+        "claimed_at": "2026-09-11T08:00:00+02:00",
+        "started_at": "2026-09-11T08:00:00+02:00",
+        "finished_at": "2026-09-11T08:00:03+02:00",
+    }
+    fake_facade.executions[("default", job_id)].insert(0, fresh_execution)
+    fake_facade.outputs[(job_id, "exec-fresh")] = "Resultado nuevo"
+    await runtime.reconcile_scheduled_tasks("default")
+    assert fake_facade.mirrored_results == [
+        (session_id, "[Cron delivery: Informe diario]\nResultado nuevo")
+    ]
+    await runtime.reconcile_scheduled_tasks("default")
+    assert len(fake_facade.mirrored_results) == 1
+
+    runs = await client.get(
+        f"/p/default/v1/mobile/scheduled-tasks/{task['id']}/runs", headers=headers
+    )
+    run_items = (await runs.json())["items"]
+    assert [item["status"] for item in run_items] == ["completed", "completed"]
+    detail = await client.get(
+        f"/p/default/v1/mobile/scheduled-runs/{run_items[0]['id']}", headers=headers
+    )
+    assert (await detail.json())["result"] == "Resultado nuevo"
+    marked = await client.post(
+        f"/p/default/v1/mobile/scheduled-runs/{run_items[0]['id']}/read",
+        headers=headers,
+    )
+    assert marked.status == 204
+
+    patched = await client.patch(
+        f"/p/default/v1/mobile/scheduled-tasks/{task['id']}",
+        headers=headers,
+        json={"conversation_delivery": "hub_only", "name": "Informe"},
+    )
+    patched_body = await patched.json()
+    assert patched_body["name"] == "Informe"
+    assert patched_body["delivery"]["conversation"] == {
+        "mode": "hub_only",
+        "effective": "hub_only",
+        "conversation_id": conversation["id"],
+    }
+    assert fake_facade.jobs["default"][job_id]["attach_to_session"] is False
+
+    paused = await client.post(
+        f"/p/default/v1/mobile/scheduled-tasks/{task['id']}/pause", headers=headers
+    )
+    assert (await paused.json())["state"] == "paused"
+    resumed = await client.post(
+        f"/p/default/v1/mobile/scheduled-tasks/{task['id']}/resume", headers=headers
+    )
+    assert (await resumed.json())["state"] == "scheduled"
+    triggered = await client.post(
+        f"/p/default/v1/mobile/scheduled-tasks/{task['id']}/run", headers=headers
+    )
+    assert triggered.status == 202
+    deleted = await client.delete(
+        f"/p/default/v1/mobile/scheduled-tasks/{task['id']}", headers=headers
+    )
+    assert deleted.status == 204

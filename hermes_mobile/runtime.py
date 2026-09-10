@@ -7,23 +7,36 @@ from pathlib import Path
 from .config import MobileConfig
 from .files.extraction import ExtractionError, extract_attachment
 from .hermes.api_client import HermesAPIClient
+from .hermes.cron_reader import NativeCronReader
 from .hermes.event_mapper import map_event
 from .lifecycle import TaskSupervisor
 from .notifications.worker import PushWorker
-from .persistence.repositories import ControlStore, ProfileStore
+from .persistence.repositories import ControlStore, ProfileStore, iso
 from .security.tokens import SecretBox, TokenManager
 
 logger = logging.getLogger("hermes_mobile")
 
+SCHEDULED_TASK_INSTRUCTIONS = """Hermes Mobile tiene un hub para todas las tareas programadas.
+Cuando uses cronjob para crear o actualizar una tarea, usa deliver='local' salvo que el usuario
+pida explícitamente otro destino externo. Nunca uses Telegram ni origin como destino implícito.
+Usa attach_to_session=true si el resultado también debería aparecer en esta conversación y false
+si debe quedar sólo en el hub; decide según la petición del usuario."""
+
 
 class MobileRuntime:
-    def __init__(self, config: MobileConfig, facade: HermesAPIClient | None = None):
+    def __init__(
+        self,
+        config: MobileConfig,
+        facade: HermesAPIClient | None = None,
+        cron_reader: NativeCronReader | None = None,
+    ):
         self.config = config
         data_root = config.default_home / "plugin-data" / "hermes-mobile"
         self.control = ControlStore(data_root / "control.db")
         self.tokens = TokenManager(data_root / "keys", config.access_token_ttl_seconds)
         self.box = SecretBox(data_root / "keys" / "data-encryption.key")
         self.facade = facade or HermesAPIClient(config.loopback_base_url)
+        self.cron_reader = cron_reader or NativeCronReader()
         self.supervisor = TaskSupervisor()
         self.push_worker = PushWorker(self.control, self.box, config.push)
         self._stores: dict[str, ProfileStore] = {}
@@ -104,6 +117,11 @@ class MobileRuntime:
                 await asyncio.to_thread(
                     store.append_event, public_run_id, event_type, data
                 )
+                if (
+                    event_type == "tool.completed"
+                    and (data.get("tool_name") or data.get("name")) == "cronjob"
+                ):
+                    await self.reconcile_scheduled_tasks(profile)
                 if event_type == "run.started":
                     await asyncio.to_thread(store.update_run, public_run_id, "running")
                 elif event_type in {"run.completed", "run.failed", "run.cancelled"}:
@@ -116,6 +134,7 @@ class MobileRuntime:
                     )
                     if status != "cancelled":
                         await self._notify(profile, public_run_id, status)
+                    await self.reconcile_scheduled_tasks(profile)
                 elif event_type == "approval.requested":
                     await asyncio.to_thread(
                         store.update_run, public_run_id, "waiting_for_approval"
@@ -245,3 +264,153 @@ class MobileRuntime:
                         )
                         if status in {"completed", "failed"} and previous != status:
                             await self._notify(profile, run["public_id"], status)
+                await self.reconcile_scheduled_tasks(profile)
+
+    async def reconcile_scheduled_tasks(self, profile: str) -> None:
+        """Project native Hermes cron state into the mobile hub."""
+        store = self.store(profile)
+        try:
+            payload = await self.facade.list_scheduled_tasks(
+                profile, include_disabled=True
+            )
+        except Exception:
+            return
+        for job in payload.get("jobs", []):
+            job_id = str(job.get("id") or "")
+            if not job_id:
+                continue
+            origin = job.get("origin") if isinstance(job.get("origin"), dict) else {}
+            origin_session = (
+                str(origin.get("chat_id") or "")
+                if origin.get("platform") == "api_server"
+                else ""
+            )
+            conversation = (
+                await asyncio.to_thread(store.conversation_by_hermes_id, origin_session)
+                if origin_session and origin_session != "api"
+                else None
+            )
+            existing_task = await asyncio.to_thread(
+                store.scheduled_task_by_hermes_id, job_id
+            )
+            task = await asyncio.to_thread(
+                store.ensure_scheduled_task,
+                job_id,
+                conversation["public_id"] if conversation else None,
+            )
+
+            # api_server cannot receive Hermes asynchronous deliveries. Keep
+            # native execution/output persistence and route the implicit result
+            # to the hub instead of inheriting Telegram or a dead API target.
+            deliver = str(job.get("deliver") or "")
+            if origin.get("platform") == "api_server" and (
+                deliver == "origin" or deliver.startswith("api_server")
+            ):
+                try:
+                    updated = await self.facade.update_scheduled_task(
+                        profile, job_id, {"deliver": "local"}
+                    )
+                    job = updated.get("job") or {**job, "deliver": "local"}
+                except Exception:
+                    logger.warning(
+                        "Could not normalize API-origin cron delivery for %s", job_id
+                    )
+
+            try:
+                executions = await asyncio.to_thread(
+                    self.cron_reader.list_executions,
+                    self.profile_home(profile),
+                    job_id,
+                    limit=20,
+                )
+            except Exception:
+                continue
+            for execution in executions:
+                execution_id = str(execution.get("id") or "")
+                if not execution_id:
+                    continue
+                prior = await asyncio.to_thread(
+                    store.scheduled_run_by_hermes_id, execution_id
+                )
+                run = await asyncio.to_thread(
+                    store.ensure_scheduled_run,
+                    task["public_id"],
+                    execution_id,
+                    str(execution.get("claimed_at") or ""),
+                )
+                if execution.get("status") not in {"completed", "failed", "unknown"}:
+                    continue
+                if existing_task is None:
+                    # Backfill is visible and unread in the hub, but never
+                    # replays stale push notifications or chat deliveries.
+                    await asyncio.to_thread(
+                        store.update_scheduled_run,
+                        run["public_id"],
+                        {
+                            "notification_enqueued_at": iso(),
+                            "conversation_delivered_at": iso(),
+                        },
+                    )
+                    continue
+                if prior and prior.get("notification_enqueued_at"):
+                    continue
+
+                policy = task.get("conversation_policy")
+                should_mirror = policy == "origin" or (
+                    policy is None and job.get("attach_to_session") is True
+                )
+                if (
+                    should_mirror
+                    and conversation
+                    and not run.get("conversation_delivered_at")
+                ):
+                    output = await asyncio.to_thread(
+                        self.cron_reader.execution_output,
+                        self.profile_home(profile),
+                        job_id,
+                        execution,
+                    )
+                    text = output or str(execution.get("error") or "")
+                    if text.strip():
+                        try:
+                            await asyncio.to_thread(
+                                self.cron_reader.append_conversation_result,
+                                self.profile_home(profile),
+                                conversation["hermes_session_id"],
+                                f"[Cron delivery: {job.get('name') or job_id}]\n{text}",
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Could not mirror scheduled result %s", execution_id
+                            )
+                            continue
+                    await asyncio.to_thread(
+                        store.update_scheduled_run,
+                        run["public_id"],
+                        {"conversation_delivered_at": iso()},
+                    )
+
+                status = str(execution.get("status"))
+                await asyncio.to_thread(
+                    self.control.enqueue_push,
+                    profile,
+                    f"scheduled_task.{status}",
+                    execution_id,
+                    {
+                        "title": str(job.get("name") or "Tarea programada"),
+                        "body": "El resultado programado está listo"
+                        if status == "completed"
+                        else "La tarea programada ha fallado",
+                        "data": {
+                            "type": f"scheduled_task.{status}",
+                            "profile": profile,
+                            "scheduled_task_id": task["public_id"],
+                            "scheduled_run_id": run["public_id"],
+                        },
+                    },
+                )
+                await asyncio.to_thread(
+                    store.update_scheduled_run,
+                    run["public_id"],
+                    {"notification_enqueued_at": iso()},
+                )

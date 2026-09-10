@@ -89,6 +89,24 @@ Cuando `public_base_url` está configurada, la URI incluye también el host y la
 emparejamiento escaneando el QR sin pedir al usuario que copie una dirección. Los clientes antiguos
 pueden ignorar ese parámetro adicional.
 
+## Hub de tareas programadas
+
+La API móvil proyecta el CRON nativo de Hermes en `/v1/mobile/scheduled-tasks`. Hermes sigue siendo
+responsable de interpretar horarios, registrar jobs, reclamar ejecuciones, reintentar y guardar cada
+output; el plugin sólo añade identificadores públicos, no-leídos, notificaciones y la política de copia
+a conversación. Las tareas creadas por el agente desde una conversación móvil usan `deliver=local` por
+defecto, por lo que Telegram nunca se hereda como destino implícito.
+
+Todo resultado aparece en el hub. `delivery.conversation.mode` controla únicamente una copia adicional:
+
+- `agent`: Hermes decide mediante su campo nativo `attach_to_session`.
+- `hub_only`: no se copia a la conversación.
+- `origin`: se copia a la conversación móvil donde se creó la tarea, cuando sigue disponible.
+
+Un destino externo solicitado expresamente se conserva y se muestra en `delivery.external`. El primer
+descubrimiento de historial existente no reproduce notificaciones ni llena conversaciones antiguas;
+las ejecuciones siguen apareciendo como no leídas en el hub.
+
 ## Datos, backup y recuperación
 
 - Control compartido: `~/.hermes/plugin-data/hermes-mobile/control.db`.

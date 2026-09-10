@@ -309,6 +309,77 @@ class HermesAPIClient:
             )
         )[1]
 
+    async def list_scheduled_tasks(
+        self, profile: str, *, include_disabled: bool = True
+    ) -> dict[str, Any]:
+        return (
+            await self._request(
+                "GET",
+                profile,
+                "/api/jobs",
+                params={"include_disabled": str(include_disabled).lower()},
+                expected={200},
+            )
+        )[1]
+
+    async def get_scheduled_task(self, profile: str, job_id: str) -> dict[str, Any]:
+        return (
+            await self._request(
+                "GET", profile, f"/api/jobs/{quote(job_id, safe='')}", expected={200}
+            )
+        )[1]
+
+    async def update_scheduled_task(
+        self, profile: str, job_id: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        return (
+            await self._request(
+                "PATCH",
+                profile,
+                f"/api/jobs/{quote(job_id, safe='')}",
+                json=body,
+                expected={200},
+            )
+        )[1]
+
+    async def delete_scheduled_task(self, profile: str, job_id: str) -> None:
+        await self._request(
+            "DELETE", profile, f"/api/jobs/{quote(job_id, safe='')}", expected={200}
+        )
+
+    async def pause_scheduled_task(self, profile: str, job_id: str) -> dict[str, Any]:
+        return (
+            await self._request(
+                "POST",
+                profile,
+                f"/api/jobs/{quote(job_id, safe='')}/pause",
+                json={},
+                expected={200},
+            )
+        )[1]
+
+    async def resume_scheduled_task(self, profile: str, job_id: str) -> dict[str, Any]:
+        return (
+            await self._request(
+                "POST",
+                profile,
+                f"/api/jobs/{quote(job_id, safe='')}/resume",
+                json={},
+                expected={200},
+            )
+        )[1]
+
+    async def run_scheduled_task(self, profile: str, job_id: str) -> dict[str, Any]:
+        return (
+            await self._request(
+                "POST",
+                profile,
+                f"/api/jobs/{quote(job_id, safe='')}/run",
+                json={},
+                expected={200},
+            )
+        )[1]
+
     async def models(self, profile: str) -> dict[str, Any]:
         return (await self._request("GET", profile, "/v1/models", expected={200}))[1]
 

@@ -278,6 +278,78 @@ async def test_real_multiplexed_hermes_mobile_surface():
         assert pushes[0]["data"]["profile"] == "default"
         assert pushes[0]["data"]["conversation_id"] == default_conv["id"]
 
+        # The hub projects Hermes' real job store, execution ledger and output
+        # files. An inherited API origin is normalized before the task fires.
+        native_job = await client.post(
+            "/p/default/api/jobs",
+            headers={"Authorization": "Bearer default-api-server-key-0000000000000001"},
+            json={
+                "name": "Docker scheduled result",
+                "schedule": "0 0 * * *",
+                "prompt": "Return the scheduled integration result.",
+                "deliver": "origin",
+            },
+        )
+        assert native_job.status_code == 200, native_job.text
+        scheduled = (
+            await client.get(
+                "/p/default/v1/mobile/scheduled-tasks", headers=default_headers
+            )
+        ).json()
+        task = next(
+            item
+            for item in scheduled["items"]
+            if item["name"] == "Docker scheduled result"
+        )
+        assert task["delivery"]["primary"] == "hub"
+        normalized = await client.get(
+            f"/p/default/api/jobs/{native_job.json()['job']['id']}",
+            headers={"Authorization": "Bearer default-api-server-key-0000000000000001"},
+        )
+        assert normalized.json()["job"]["deliver"] == "local"
+        fired = await client.post(
+            f"/p/default/v1/mobile/scheduled-tasks/{task['id']}/run",
+            headers=default_headers,
+        )
+        assert fired.status_code == 202, fired.text
+        scheduled_runs = []
+        # The production ticker intentionally polls at a coarse interval; the
+        # run-now endpoint marks the job due rather than bypassing that native
+        # claim path.
+        for _ in range(360):
+            scheduled_runs = (
+                await client.get(
+                    f"/p/default/v1/mobile/scheduled-tasks/{task['id']}/runs",
+                    headers=default_headers,
+                )
+            ).json()["items"]
+            if scheduled_runs and scheduled_runs[0]["status"] in {
+                "completed",
+                "failed",
+                "unknown",
+            }:
+                break
+            await asyncio.sleep(0.25)
+        assert scheduled_runs and scheduled_runs[0]["status"] == "completed"
+        scheduled_result = await client.get(
+            f"/p/default/v1/mobile/scheduled-runs/{scheduled_runs[0]['id']}",
+            headers=default_headers,
+        )
+        assert scheduled_result.status_code == 200, scheduled_result.text
+        assert "Hermes real respondió" in scheduled_result.json()["result"]
+        assert (
+            await client.post(
+                f"/p/default/v1/mobile/scheduled-runs/{scheduled_runs[0]['id']}/read",
+                headers=default_headers,
+            )
+        ).status_code == 204
+        assert (
+            await client.delete(
+                f"/p/default/v1/mobile/scheduled-tasks/{task['id']}",
+                headers=default_headers,
+            )
+        ).status_code == 204
+
         # Exercise a dependency outage in the same authenticated real-world
         # journey. Hermes must complete the run while the push is retained for
         # retry in the durable outbox.

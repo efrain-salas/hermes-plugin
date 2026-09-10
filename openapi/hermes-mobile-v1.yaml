@@ -724,6 +724,276 @@ paths:
           $ref: '#/components/responses/MobileError'
       security:
       - mobileBearer: []
+  /p/{profile}/v1/mobile/scheduled-tasks:
+    get:
+      operationId: listScheduledTasks
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/scheduled-tasks/{scheduled_task_id}:
+    get:
+      operationId: getScheduledTask
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: scheduled_task_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+    patch:
+      operationId: patchScheduledTask
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: scheduled_task_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+    delete:
+      operationId: deleteScheduledTask
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: scheduled_task_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/scheduled-tasks/{scheduled_task_id}/pause:
+    post:
+      operationId: pauseScheduledTask
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: scheduled_task_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/scheduled-tasks/{scheduled_task_id}/resume:
+    post:
+      operationId: resumeScheduledTask
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: scheduled_task_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/scheduled-tasks/{scheduled_task_id}/run:
+    post:
+      operationId: runScheduledTask
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: scheduled_task_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/scheduled-tasks/{scheduled_task_id}/runs:
+    get:
+      operationId: listScheduledTaskRuns
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: scheduled_task_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/scheduled-runs/{scheduled_run_id}:
+    get:
+      operationId: getScheduledRun
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: scheduled_run_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+  /p/{profile}/v1/mobile/scheduled-runs/{scheduled_run_id}/read:
+    post:
+      operationId: readScheduledRun
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: scheduled_run_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
   /p/{profile}/v1/mobile/attachments:
     get:
       operationId: listAttachments

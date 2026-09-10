@@ -1,5 +1,5 @@
 CONTROL_SCHEMA_VERSION = 2
-PROFILE_SCHEMA_VERSION = 1
+PROFILE_SCHEMA_VERSION = 2
 
 CONTROL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -211,7 +211,31 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS scheduled_task_map (
+    public_id TEXT PRIMARY KEY,
+    hermes_job_id TEXT NOT NULL UNIQUE,
+    origin_conversation_id TEXT REFERENCES conversation_map(public_id),
+    conversation_policy TEXT CHECK(
+        conversation_policy IS NULL OR
+        conversation_policy IN ('hub_only','origin')
+    ),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
+);
+CREATE TABLE IF NOT EXISTS scheduled_run_state (
+    public_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES scheduled_task_map(public_id) ON DELETE CASCADE,
+    hermes_execution_id TEXT NOT NULL UNIQUE,
+    read_at TEXT,
+    conversation_delivered_at TEXT,
+    notification_enqueued_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_events_run_sequence ON run_events(run_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_sync_sequence ON sync_journal(sequence);
 CREATE INDEX IF NOT EXISTS idx_attachments_conversation ON attachments(conversation_id, status);
+CREATE INDEX IF NOT EXISTS idx_scheduled_runs_task
+    ON scheduled_run_state(task_id, created_at DESC);
 """

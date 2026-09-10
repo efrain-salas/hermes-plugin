@@ -654,6 +654,9 @@ class ControlStore(SQLiteStore):
                 "run.completed": "turn_completed",
                 "run.failed": "turn_failed",
                 "approval.requested": "approval_required",
+                "scheduled_task.completed": "scheduled_task_completed",
+                "scheduled_task.failed": "scheduled_task_failed",
+                "scheduled_task.unknown": "scheduled_task_failed",
             }.get(kind)
             for device in devices:
                 prefs = json.loads(device["notification_preferences_json"] or "{}")
@@ -815,6 +818,16 @@ class ProfileStore(SQLiteStore):
             row = conn.execute(sql, (public_id,)).fetchone()
             return dict(row) if row else None
 
+    def conversation_by_hermes_id(
+        self, hermes_session_id: str
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM conversation_map WHERE hermes_session_id=? AND deleted_at IS NULL",
+                (hermes_session_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
     def update_conversation(self, public_id: str, fields: dict[str, Any]) -> None:
         allowed = {
             "title_override",
@@ -871,6 +884,182 @@ class ProfileStore(SQLiteStore):
                 {"id": public_id, "conversation_id": conversation_id},
             )
             return public_id
+
+    def ensure_scheduled_task(
+        self,
+        hermes_job_id: str,
+        origin_conversation_id: str | None = None,
+    ) -> dict[str, Any]:
+        now = iso()
+
+        def _ensure(conn: sqlite3.Connection) -> dict[str, Any]:
+            row = conn.execute(
+                "SELECT * FROM scheduled_task_map WHERE hermes_job_id=?",
+                (hermes_job_id,),
+            ).fetchone()
+            if row:
+                if origin_conversation_id and not row["origin_conversation_id"]:
+                    conn.execute(
+                        "UPDATE scheduled_task_map SET origin_conversation_id=?,updated_at=? "
+                        "WHERE public_id=?",
+                        (origin_conversation_id, now, row["public_id"]),
+                    )
+                    row = conn.execute(
+                        "SELECT * FROM scheduled_task_map WHERE public_id=?",
+                        (row["public_id"],),
+                    ).fetchone()
+                return dict(row)
+            public_id = new_id("stask")
+            conn.execute(
+                "INSERT INTO scheduled_task_map(public_id,hermes_job_id,origin_conversation_id,created_at,updated_at) "
+                "VALUES (?,?,?,?,?)",
+                (public_id, hermes_job_id, origin_conversation_id, now, now),
+            )
+            self._journal_conn(
+                conn, "scheduled_task", public_id, "created", {"id": public_id}
+            )
+            return dict(
+                conn.execute(
+                    "SELECT * FROM scheduled_task_map WHERE public_id=?", (public_id,)
+                ).fetchone()
+            )
+
+        return self.transaction(_ensure)
+
+    def scheduled_task(self, public_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM scheduled_task_map WHERE public_id=? AND deleted_at IS NULL",
+                (public_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def scheduled_task_by_hermes_id(self, hermes_job_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM scheduled_task_map WHERE hermes_job_id=? AND deleted_at IS NULL",
+                (hermes_job_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def update_scheduled_task(
+        self, public_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        allowed = {"origin_conversation_id", "conversation_policy", "deleted_at"}
+        clean = {key: value for key, value in fields.items() if key in allowed}
+        if not clean:
+            return self.scheduled_task(public_id)
+        clean["updated_at"] = iso()
+
+        def _update(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            conn.execute(
+                "UPDATE scheduled_task_map SET "
+                + ",".join(f"{key}=?" for key in clean)
+                + " WHERE public_id=?",
+                (*clean.values(), public_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM scheduled_task_map WHERE public_id=?", (public_id,)
+            ).fetchone()
+            if row:
+                operation = "deleted" if clean.get("deleted_at") else "updated"
+                self._journal_conn(
+                    conn,
+                    "scheduled_task",
+                    public_id,
+                    operation,
+                    {"id": public_id, **clean},
+                )
+                return dict(row)
+            return None
+
+        return self.transaction(_update)
+
+    def ensure_scheduled_run(
+        self, task_id: str, hermes_execution_id: str, created_at: str
+    ) -> dict[str, Any]:
+        now = iso()
+
+        def _ensure(conn: sqlite3.Connection) -> dict[str, Any]:
+            row = conn.execute(
+                "SELECT * FROM scheduled_run_state WHERE hermes_execution_id=?",
+                (hermes_execution_id,),
+            ).fetchone()
+            if row:
+                return dict(row)
+            public_id = new_id("srun")
+            conn.execute(
+                "INSERT INTO scheduled_run_state(public_id,task_id,hermes_execution_id,created_at,updated_at) "
+                "VALUES (?,?,?,?,?)",
+                (public_id, task_id, hermes_execution_id, created_at or now, now),
+            )
+            self._journal_conn(
+                conn,
+                "scheduled_run",
+                public_id,
+                "created",
+                {"id": public_id, "task_id": task_id},
+            )
+            return dict(
+                conn.execute(
+                    "SELECT * FROM scheduled_run_state WHERE public_id=?", (public_id,)
+                ).fetchone()
+            )
+
+        return self.transaction(_ensure)
+
+    def scheduled_run(self, public_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM scheduled_run_state WHERE public_id=?", (public_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def scheduled_run_by_hermes_id(
+        self, hermes_execution_id: str
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM scheduled_run_state WHERE hermes_execution_id=?",
+                (hermes_execution_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def update_scheduled_run(
+        self, public_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        allowed = {
+            "read_at",
+            "conversation_delivered_at",
+            "notification_enqueued_at",
+        }
+        clean = {key: value for key, value in fields.items() if key in allowed}
+        if not clean:
+            return self.scheduled_run(public_id)
+        clean["updated_at"] = iso()
+
+        def _update(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            conn.execute(
+                "UPDATE scheduled_run_state SET "
+                + ",".join(f"{key}=?" for key in clean)
+                + " WHERE public_id=?",
+                (*clean.values(), public_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM scheduled_run_state WHERE public_id=?", (public_id,)
+            ).fetchone()
+            if row:
+                self._journal_conn(
+                    conn,
+                    "scheduled_run",
+                    public_id,
+                    "updated",
+                    {"id": public_id, "task_id": row["task_id"], **clean},
+                )
+                return dict(row)
+            return None
+
+        return self.transaction(_update)
 
     def create_run(
         self, conversation_id: str, hermes_run_id: str, client_message_id: str | None
