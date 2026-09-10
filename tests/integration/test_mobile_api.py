@@ -295,6 +295,31 @@ async def test_system_auth_devices_refresh_and_logout(client, runtime, auth):
     ).status == 401
 
 
+async def test_push_token_moves_to_latest_device_registration(client, runtime):
+    first = await pair_client(client, runtime, installation_id="installation-first")
+    second = await pair_client(client, runtime, installation_id="installation-second")
+    push_token = "ExponentPushToken[one-physical-device]"
+
+    for paired in (first, second):
+        response = await client.post(
+            "/p/default/v1/mobile/devices",
+            headers={"Authorization": f"Bearer {paired['access_token']}"},
+            json={"push_provider": "expo", "push_token": push_token},
+        )
+        assert response.status == 200
+
+    devices = await client.get(
+        "/p/default/v1/mobile/devices",
+        headers={"Authorization": f"Bearer {second['access_token']}"},
+    )
+    rows = {item["id"]: item for item in (await devices.json())["items"]}
+    assert rows[first["device_id"]]["push_registered"] is False
+    assert rows[second["device_id"]]["push_registered"] is True
+    assert runtime.control.enqueue_push(
+        "default", "run.completed", "one-run", {"title": "Done"}
+    ) == 1
+
+
 async def test_conversation_full_lifecycle_and_idempotency(client, auth):
     _, headers = auth
     conversation = await _conversation(client, headers)

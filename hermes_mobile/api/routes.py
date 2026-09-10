@@ -661,6 +661,9 @@ class MobileAPI:
         push_token = values.pop("push_token", None)
         if push_token:
             values["push_token_encrypted"] = self.runtime.box.encrypt(push_token)
+            values["push_token_hash"] = hashlib.sha256(
+                push_token.encode("utf-8")
+            ).hexdigest()
         if "notifications" in values:
             values["notification_preferences_json"] = json_dump(
                 values.pop("notifications")

@@ -97,6 +97,74 @@ def test_outbox_is_deduplicated_and_respects_preferences(tmp_path):
     )
 
 
+def test_legacy_duplicate_push_tokens_are_normalized(tmp_path):
+    store = ControlStore(tmp_path / "control.db")
+    store.initialize()
+    box = SecretBox(tmp_path / "data.key")
+    for installation in ("install-first", "install-second"):
+        pairing = store.create_pairing("default", "Alice", 600)
+        paired = store.consume_pairing(
+            "default",
+            pairing["token"],
+            {"installation_id": installation, "name": "Phone", "platform": "ios"},
+            ("devices:self",),
+        )
+        store.update_device(
+            paired["device"]["id"],
+            {"push_token_encrypted": box.encrypt("ExponentPushToken[same]")},
+        )
+
+    assert store.normalize_push_registrations(box.decrypt) == 1
+    with store.connect() as conn:
+        registered = conn.execute(
+            "SELECT COUNT(*) FROM devices WHERE push_token_encrypted IS NOT NULL"
+        ).fetchone()[0]
+        hashed = conn.execute(
+            "SELECT COUNT(*) FROM devices WHERE push_token_hash IS NOT NULL"
+        ).fetchone()[0]
+    assert registered == hashed == 1
+    assert store.enqueue_push(
+        "default", "run.completed", "run_one", {"title": "Hermes"}
+    ) == 1
+
+
+def test_control_store_migrates_push_token_hash(tmp_path):
+    db = sqlite3.connect(tmp_path / "control.db")
+    db.executescript(
+        """
+        CREATE TABLE devices (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            installation_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            app_version TEXT,
+            locale TEXT,
+            timezone TEXT,
+            push_provider TEXT,
+            push_token_encrypted TEXT,
+            notification_preferences_json TEXT NOT NULL DEFAULT '{}',
+            scopes_json TEXT NOT NULL,
+            last_seen_at TEXT,
+            revoked_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+    db.close()
+
+    store = ControlStore(tmp_path / "control.db")
+    store.initialize()
+    with store.connect() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(devices)")}
+        indexes = {
+            row["name"] for row in conn.execute("PRAGMA index_list(devices)")
+        }
+    assert "push_token_hash" in columns
+    assert "idx_devices_user_push_token" in indexes
+
+
 def test_profile_store_migrates_and_persists_conversation_reasoning(tmp_path):
     root = tmp_path / "plugin-data" / "hermes-mobile"
     root.mkdir(parents=True)

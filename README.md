@@ -85,6 +85,10 @@ hermes mobile revoke-device dev_xxx --profile default
 en formato estructurado; `--qr` permite documentar explícitamente el formato interactivo. El secreto es
 de un solo uso y expira a los diez minutos por defecto. Trátalo como una credencial temporal.
 
+Dentro de cada perfil, un token push sólo puede pertenecer a un dispositivo activo. Si iOS vuelve a
+registrar el mismo token con otro `installation_id`, la recepción push se transfiere al registro más
+reciente para evitar notificaciones duplicadas. Al arrancar también se normalizan registros antiguos.
+
 Cuando `public_base_url` está configurada, la URI incluye también el host y la app puede completar el
 emparejamiento escaneando el QR sin pedir al usuario que copie una dirección. Los clientes antiguos
 pueden ignorar ese parámetro adicional.

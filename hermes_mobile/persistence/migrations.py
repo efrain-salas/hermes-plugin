@@ -1,4 +1,4 @@
-CONTROL_SCHEMA_VERSION = 2
+CONTROL_SCHEMA_VERSION = 3
 PROFILE_SCHEMA_VERSION = 4
 
 CONTROL_SCHEMA = """
@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS devices (
     timezone TEXT,
     push_provider TEXT,
     push_token_encrypted TEXT,
+    push_token_hash TEXT,
     notification_preferences_json TEXT NOT NULL DEFAULT '{}',
     scopes_json TEXT NOT NULL,
     last_seen_at TEXT,

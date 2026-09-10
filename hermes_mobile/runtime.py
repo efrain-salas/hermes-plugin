@@ -76,6 +76,14 @@ class MobileRuntime:
         if self.started:
             return
         await asyncio.to_thread(self.control.initialize)
+        removed_push_duplicates = await asyncio.to_thread(
+            self.control.normalize_push_registrations, self.box.decrypt
+        )
+        if removed_push_duplicates:
+            logger.info(
+                "Disabled %d duplicate push registration(s)",
+                removed_push_duplicates,
+            )
         for profile in await asyncio.to_thread(self.control.profile_ids):
             await asyncio.to_thread(self.store, profile)
         await self.facade.start()

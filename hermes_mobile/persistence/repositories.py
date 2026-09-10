@@ -115,6 +115,15 @@ class ControlStore(SQLiteStore):
     def __init__(self, path: Path):
         super().__init__(path, CONTROL_SCHEMA, CONTROL_SCHEMA_VERSION)
 
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(devices)")}
+        if "push_token_hash" not in columns:
+            conn.execute("ALTER TABLE devices ADD COLUMN push_token_hash TEXT")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_user_push_token "
+            "ON devices(user_id,push_token_hash) WHERE push_token_hash IS NOT NULL"
+        )
+
     def create_pairing(
         self, profile: str, display_name: str, ttl_seconds: int
     ) -> dict[str, Any]:
@@ -593,7 +602,7 @@ class ControlStore(SQLiteStore):
 
         def _revoke(conn: sqlite3.Connection) -> bool:
             changed = conn.execute(
-                "UPDATE devices SET revoked_at=?,push_token_encrypted=NULL,updated_at=? "
+                "UPDATE devices SET revoked_at=?,push_token_encrypted=NULL,push_token_hash=NULL,updated_at=? "
                 "WHERE id=? AND revoked_at IS NULL",
                 (now, now, device_id),
             ).rowcount
@@ -626,22 +635,101 @@ class ControlStore(SQLiteStore):
             "timezone",
             "push_provider",
             "push_token_encrypted",
+            "push_token_hash",
             "notification_preferences_json",
         }
         clean = {key: value for key, value in fields.items() if key in allowed}
         if clean:
             clean["updated_at"] = iso()
             columns = ",".join(f"{key}=?" for key in clean)
-            with self.connect() as conn:
+            def _update(conn: sqlite3.Connection) -> dict[str, Any] | None:
+                target = conn.execute(
+                    "SELECT user_id FROM devices WHERE id=? AND revoked_at IS NULL",
+                    (device_id,),
+                ).fetchone()
+                if not target:
+                    return None
+                push_token_hash = clean.get("push_token_hash")
+                if push_token_hash:
+                    conn.execute(
+                        "UPDATE devices SET push_token_encrypted=NULL,push_token_hash=NULL,updated_at=? "
+                        "WHERE user_id=? AND id<>? AND push_token_hash=?",
+                        (
+                            clean["updated_at"],
+                            target["user_id"],
+                            device_id,
+                            push_token_hash,
+                        ),
+                    )
                 conn.execute(
                     f"UPDATE devices SET {columns} WHERE id=? AND revoked_at IS NULL",
                     (*clean.values(), device_id),
                 )
+                row = conn.execute(
+                    "SELECT * FROM devices WHERE id=?", (device_id,)
+                ).fetchone()
+                return dict(row) if row else None
+
+            return self.transaction(_update)
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT * FROM devices WHERE id=?", (device_id,)
             ).fetchone()
             return dict(row) if row else None
+
+    def normalize_push_registrations(
+        self, decrypt: Callable[[str], str]
+    ) -> int:
+        """Backfill token hashes and disable duplicate registrations per profile."""
+        with self.connect() as conn:
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT id,user_id,push_token_encrypted,last_seen_at,updated_at,created_at "
+                    "FROM devices WHERE revoked_at IS NULL AND push_token_encrypted IS NOT NULL"
+                )
+            ]
+
+        groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for row in rows:
+            try:
+                token_hash = secret_hash(decrypt(row["push_token_encrypted"]))
+            except Exception:
+                continue
+            groups.setdefault((row["user_id"], token_hash), []).append(row)
+
+        now = iso()
+
+        def _normalize(conn: sqlite3.Connection) -> int:
+            conn.execute(
+                "UPDATE devices SET push_token_hash=NULL WHERE push_token_encrypted IS NULL"
+            )
+            removed = 0
+            for (_user_id, token_hash), registrations in groups.items():
+                registrations.sort(
+                    key=lambda row: (
+                        row.get("last_seen_at")
+                        or row.get("updated_at")
+                        or row.get("created_at")
+                        or "",
+                        row["id"],
+                    ),
+                    reverse=True,
+                )
+                winner, *duplicates = registrations
+                for duplicate in duplicates:
+                    removed += conn.execute(
+                        "UPDATE devices SET push_token_encrypted=NULL,push_token_hash=NULL,updated_at=? "
+                        "WHERE id=?",
+                        (now, duplicate["id"]),
+                    ).rowcount
+                conn.execute(
+                    "UPDATE devices SET push_token_hash=? WHERE id=?",
+                    (token_hash, winner["id"]),
+                )
+            return removed
+
+        return self.transaction(_normalize)
 
     def enqueue_push(
         self, profile: str, kind: str, dedupe_key: str, payload: dict[str, Any]
