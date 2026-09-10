@@ -106,6 +106,13 @@ def _profile_home(name: str) -> Path:
         )
 
 
+def _shared_root(profile: str, profile_home: Path | None = None) -> Path:
+    home = profile_home or _profile_home(profile)
+    if profile != "default" and home.parent.name == "profiles":
+        return home.parent.parent
+    return _default_home()
+
+
 def _read_yaml(path: Path) -> dict[str, Any]:
     try:
         value = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -254,8 +261,8 @@ def provision() -> int:
 
 
 def doctor(profile: str) -> int:
-    root = _default_home()
     home = _profile_home(profile)
+    root = _shared_root(profile, home)
     default_config = _read_yaml(root / "config.yaml")
     profile_config = _read_yaml(home / "config.yaml")
     settings = (
@@ -353,8 +360,8 @@ def _print_pairing_qr(pairing_url: str, profile: str, expires_at: str) -> None:
 
 
 def pair(profile: str, display_name: str | None, output: str = "qr") -> int:
-    root = _default_home()
     home = _profile_home(profile)
+    root = _shared_root(profile, home)
     if not home.is_dir():
         print("ERROR: perfil no encontrado")
         return 2
@@ -428,7 +435,7 @@ def admin_init(ttl_seconds: int = 900, json_output: bool = False) -> int:
 
 def devices(profile: str) -> int:
     store = ControlStore(
-        _default_home() / "plugin-data" / "hermes-mobile" / "control.db"
+        _shared_root(profile) / "plugin-data" / "hermes-mobile" / "control.db"
     )
     store.initialize()
     with store.connect() as conn:
@@ -456,7 +463,7 @@ def devices(profile: str) -> int:
 
 def revoke(device_id: str, profile: str) -> int:
     store = ControlStore(
-        _default_home() / "plugin-data" / "hermes-mobile" / "control.db"
+        _shared_root(profile) / "plugin-data" / "hermes-mobile" / "control.db"
     )
     store.initialize()
     with store.connect() as conn:

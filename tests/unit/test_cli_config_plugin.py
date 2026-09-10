@@ -70,6 +70,7 @@ def test_default_home_normalizes_a_named_profile(tmp_path, monkeypatch):
     profile = root / "profiles" / "mujer"
     monkeypatch.setenv("HERMES_HOME", str(profile))
     assert cli._default_home() == root
+    assert cli._shared_root("mujer", profile) == root
 
 
 def test_cli_provision_pair_devices_revoke_and_doctor(tmp_path, monkeypatch, capsys):
