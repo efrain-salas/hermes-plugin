@@ -603,6 +603,26 @@ const credentialJSON = credential => ({
   },
   clientExtensionResults: credential.getClientExtensionResults(),
 });
+const requirePasskeySupport = () => {
+  if (!window.PublicKeyCredential || !navigator.credentials) {
+    throw new Error('Este navegador no admite passkeys. Usa Safari, Chrome o Firefox actualizado.');
+  }
+};
+const requireCredential = credential => {
+  if (!credential) {
+    throw new Error('No se seleccionó ninguna passkey. Vuelve a intentarlo y completa la verificación del dispositivo.');
+  }
+  return credential;
+};
+const friendlyError = error => {
+  if (error?.name === 'NotAllowedError') {
+    return `No se completó la autenticación. Vuelve a intentarlo y selecciona la passkey de ${location.hostname}.`;
+  }
+  if (error?.name === 'SecurityError') {
+    return `El navegador rechazó la passkey por seguridad. Comprueba que estás en https://${location.host}.`;
+  }
+  return error?.message || 'No se pudo completar la operación.';
+};
 async function jsonRequest(path, options = {}) {
   const response = await fetch(API + path, options);
   const body = await response.json();
@@ -631,12 +651,13 @@ async function refresh() {
   show(null, 'El portal aún no tiene una passkey. Usa un enlace de inicialización válido.');
 }
 async function registerPasskey() {
+  requirePasskeySupport();
   const token = new URLSearchParams(location.hash.slice(1)).get('setup');
   const start = await jsonRequest('/register/options', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({bootstrap_token: token}),
   });
-  const credential = await navigator.credentials.create({publicKey: publicKeyOptions(start.publicKey)});
+  const credential = requireCredential(await navigator.credentials.create({publicKey: publicKeyOptions(start.publicKey)}));
   const complete = await jsonRequest('/register/verify', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({bootstrap_token: token, ceremony_id: start.ceremony_id, credential: credentialJSON(credential)}),
@@ -646,10 +667,11 @@ async function registerPasskey() {
   openPortal(complete.profiles, 'Passkey registrada correctamente.');
 }
 async function loginPasskey() {
+  requirePasskeySupport();
   const start = await jsonRequest('/login/options', {
     method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
   });
-  const credential = await navigator.credentials.get({publicKey: publicKeyOptions(start.publicKey)});
+  const credential = requireCredential(await navigator.credentials.get({publicKey: publicKeyOptions(start.publicKey)}));
   const complete = await jsonRequest('/login/verify', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ceremony_id: start.ceremony_id, credential: credentialJSON(credential)}),
@@ -677,7 +699,7 @@ async function createPairing() {
 }
 async function run(button, action) {
   button.disabled = true;
-  try { await action(); } catch (error) { message.textContent = error.message; }
+  try { await action(); } catch (error) { message.textContent = friendlyError(error); }
   finally { button.disabled = false; }
 }
 document.querySelector('#setupButton').onclick = event => run(event.currentTarget, registerPasskey);

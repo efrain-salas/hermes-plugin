@@ -56,7 +56,9 @@ async def test_root_is_the_unscoped_admin_portal(admin_client):
     client, _runtime = admin_client
     root = await client.get("/")
     assert root.status == 200
-    assert "Hermes Mobile" in await root.text()
+    portal_html = await root.text()
+    assert "Hermes Mobile" in portal_html
+    assert "No se seleccionó ninguna passkey" in portal_html
     assert "frame-ancestors 'none'" in root.headers["Content-Security-Policy"]
     assert root.headers["Cache-Control"] == "no-store"
 
