@@ -285,6 +285,25 @@ async def test_loopback_client_auth_paths_errors_and_sse():
     async def handler(request):
         seen.append((request.method, request.path))
         assert request.headers["Authorization"] == "Bearer scoped-secret"
+        if request.path.endswith("/api/model/options"):
+            return web.json_response(
+                {
+                    "model": "gpt-current",
+                    "provider": "openai-codex",
+                    "providers": [
+                        {
+                            "slug": "other",
+                            "is_current": False,
+                            "models": ["other-model"],
+                        },
+                        {
+                            "slug": "openai-codex",
+                            "is_current": True,
+                            "models": ["gpt-next", "gpt-current", "gpt-next"],
+                        },
+                    ],
+                }
+            )
         if request.path.endswith("/events"):
             return web.Response(
                 text='data: {"event":"run.started"}\n\ndata: {"event":"run.completed"}\n\n',
@@ -318,7 +337,22 @@ async def test_loopback_client_auth_paths_errors_and_sse():
         await client.set_conversation_model("mujer", "s1", "mock")
         await client.get_messages("mujer", "s1", limit=2)
         await client.fork_conversation("mujer", "s1", {"title": "fork"})
-        await client.models("mujer")
+        assert await client.models("mujer") == {
+            "data": [
+                {
+                    "id": "gpt-next",
+                    "object": "model",
+                    "owned_by": "openai-codex",
+                },
+                {
+                    "id": "gpt-current",
+                    "object": "model",
+                    "owned_by": "openai-codex",
+                },
+            ],
+            "default": "gpt-current",
+            "provider": "openai-codex",
+        }
         await client.toolsets("mujer")
         assert (await client.create_run("mujer", {"input": "x"}, "idem"))[
             "run_id"

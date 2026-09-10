@@ -419,7 +419,8 @@ class MobileAPI:
             "profile": {"id": profile},
             "device": self._device_resource(subject, current=True),
             "capabilities": capabilities,
-            "default_model": ((models.get("data") or [{}])[0]).get("id"),
+            "default_model": models.get("default")
+            or ((models.get("data") or [{}])[0]).get("id"),
             "preferences": {},
             "limits": {"max_file_bytes": self.runtime.config.max_file_bytes},
         }
@@ -1801,7 +1802,8 @@ class MobileAPI:
                 "items": [
                     {"id": item.get("id"), "name": item.get("id")} for item in data
                 ],
-                "default": data[0].get("id") if data else None,
+                "default": native.get("default")
+                or (data[0].get("id") if data else None),
             }
         )
 

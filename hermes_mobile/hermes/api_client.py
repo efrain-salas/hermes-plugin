@@ -381,7 +381,58 @@ class HermesAPIClient:
         )[1]
 
     async def models(self, profile: str) -> dict[str, Any]:
-        return (await self._request("GET", profile, "/v1/models", expected={200}))[1]
+        options = (
+            await self._request("GET", profile, "/api/model/options", expected={200})
+        )[1]
+        if not isinstance(options, dict):
+            options = {}
+
+        provider = str(options.get("provider") or "").strip()
+        default_model = str(options.get("model") or "").strip()
+        provider_models: list[str] = []
+        providers = options.get("providers")
+        if isinstance(providers, list):
+            current = next(
+                (
+                    item
+                    for item in providers
+                    if isinstance(item, dict)
+                    and str(item.get("slug") or "").strip() == provider
+                ),
+                None,
+            )
+            if current is None:
+                current = next(
+                    (
+                        item
+                        for item in providers
+                        if isinstance(item, dict) and item.get("is_current") is True
+                    ),
+                    None,
+                )
+            if current:
+                raw_models = current.get("models")
+                if not isinstance(raw_models, list):
+                    raw_models = []
+                provider_models = [
+                    model.strip()
+                    for model in raw_models
+                    if isinstance(model, str) and model.strip()
+                ]
+
+        # The configured model remains selectable even if a live/curated
+        # provider catalog is temporarily empty or stale.
+        if default_model and default_model not in provider_models:
+            provider_models.insert(0, default_model)
+
+        return {
+            "data": [
+                {"id": model, "object": "model", "owned_by": provider}
+                for model in dict.fromkeys(provider_models)
+            ],
+            "default": default_model or None,
+            "provider": provider or None,
+        }
 
     async def toolsets(self, profile: str) -> dict[str, Any]:
         return (await self._request("GET", profile, "/v1/toolsets", expected={200}))[1]

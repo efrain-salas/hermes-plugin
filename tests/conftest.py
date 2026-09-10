@@ -201,7 +201,11 @@ class FakeFacade:
 
     async def models(self, profile):
         self._guard()
-        return {"data": [{"id": "mock-model"}]}
+        return {
+            "data": [{"id": "mock-model-next"}, {"id": "mock-model"}],
+            "default": "mock-model",
+            "provider": "mock",
+        }
 
     async def toolsets(self, profile):
         self._guard()

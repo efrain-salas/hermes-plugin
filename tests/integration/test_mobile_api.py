@@ -34,6 +34,7 @@ async def test_system_auth_devices_refresh_and_logout(client, runtime, auth):
     assert (await capabilities.json())["streaming"] is True
     bootstrap = await client.get("/p/default/v1/mobile/bootstrap", headers=headers)
     assert bootstrap.status == 200 and bootstrap.headers["ETag"]
+    assert (await bootstrap.json())["default_model"] == "mock-model"
     cached = await client.get(
         "/p/default/v1/mobile/bootstrap",
         headers={**headers, "If-None-Match": bootstrap.headers["ETag"]},
@@ -244,7 +245,13 @@ async def test_attachment_run_sse_sync_models_and_toolsets(
     assert "event: run.completed" in events
 
     models = await client.get("/p/default/v1/mobile/models", headers=headers)
-    assert (await models.json())["default"] == "mock-model"
+    assert await models.json() == {
+        "items": [
+            {"id": "mock-model-next", "name": "mock-model-next"},
+            {"id": "mock-model", "name": "mock-model"},
+        ],
+        "default": "mock-model",
+    }
     toolsets = await client.get("/p/default/v1/mobile/toolsets", headers=headers)
     assert (await toolsets.json())["items"][0]["id"] == "hermes_mobile"
     sync = await client.get("/p/default/v1/mobile/sync?cursor=sync_0", headers=headers)
