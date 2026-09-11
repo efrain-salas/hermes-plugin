@@ -168,6 +168,38 @@ paths:
           $ref: '#/components/responses/MobileError'
       security:
       - mobileBearer: []
+  /p/{profile}/v1/mobile/preferences:
+    patch:
+      operationId: updatePreferences
+      parameters:
+      - name: profile
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Effective profile preferences
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfilePreferencesInput'
+        '400':
+          $ref: '#/components/responses/MobileError'
+        '401':
+          $ref: '#/components/responses/MobileError'
+        '404':
+          $ref: '#/components/responses/MobileError'
+        '500':
+          $ref: '#/components/responses/MobileError'
+      security:
+      - mobileBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfilePreferencesInput'
   /p/{profile}/v1/mobile/devices:
     get:
       operationId: listDevices
@@ -1566,6 +1598,7 @@ components:
       required:
       - items
       - default
+      - quick_model
       - default_reasoning_effort
       properties:
         items:
@@ -1576,10 +1609,23 @@ components:
           type:
           - string
           - 'null'
+        quick_model:
+          type:
+          - string
+          - 'null'
         default_reasoning_effort:
           anyOf:
           - $ref: '#/components/schemas/ReasoningEffort'
           - type: 'null'
+    ProfilePreferencesInput:
+      type: object
+      additionalProperties: false
+      properties:
+        quick_model:
+          type:
+          - string
+          - 'null'
+          maxLength: 200
     SyncChange:
       type: object
       required:

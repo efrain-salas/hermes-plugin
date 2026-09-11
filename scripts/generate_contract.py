@@ -17,6 +17,7 @@ ENDPOINTS = [
     ("post", "/p/{profile}/v1/mobile/auth/refresh", "refresh"),
     ("post", "/p/{profile}/v1/mobile/auth/logout", "logout"),
     ("get", "/p/{profile}/v1/mobile/me", "me"),
+    ("patch", "/p/{profile}/v1/mobile/preferences", "updatePreferences"),
     ("get", "/p/{profile}/v1/mobile/devices", "listDevices"),
     ("post", "/p/{profile}/v1/mobile/devices", "upsertDevice"),
     ("patch", "/p/{profile}/v1/mobile/devices/{device_id}", "patchDevice"),
@@ -210,6 +211,20 @@ def openapi() -> dict:
             )
             item["requestBody"]["content"]["application/json"]["schema"] = {
                 "$ref": f"#/components/schemas/{schema_name}"
+            }
+        if operation == "updatePreferences":
+            item["requestBody"]["content"]["application/json"]["schema"] = {
+                "$ref": "#/components/schemas/ProfilePreferencesInput"
+            }
+            item["responses"]["200"] = {
+                "description": "Effective profile preferences",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/ProfilePreferencesInput"
+                        }
+                    }
+                },
             }
         if operation == "createInboxConversation":
             item["requestBody"]["content"]["application/json"]["schema"] = {
@@ -460,6 +475,7 @@ def openapi() -> dict:
                     "required": [
                         "items",
                         "default",
+                        "quick_model",
                         "default_reasoning_effort",
                     ],
                     "properties": {
@@ -468,12 +484,20 @@ def openapi() -> dict:
                             "items": {"$ref": "#/components/schemas/ModelInfo"},
                         },
                         "default": {"type": ["string", "null"]},
+                        "quick_model": {"type": ["string", "null"]},
                         "default_reasoning_effort": {
                             "anyOf": [
                                 {"$ref": "#/components/schemas/ReasoningEffort"},
                                 {"type": "null"},
                             ]
                         },
+                    },
+                },
+                "ProfilePreferencesInput": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "quick_model": {"type": ["string", "null"], "maxLength": 200}
                     },
                 },
                 "SyncChange": {
@@ -761,7 +785,9 @@ export interface RunEvent { event_id: string; sequence: number; type: string; ru
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 export interface ModelReasoning { supported: boolean; can_disable: boolean | null; efforts: ReasoningEffort[]; }
 export interface ModelInfo { id: string; name: string; reasoning: ModelReasoning; }
-export interface ModelsResponse { items: ModelInfo[]; default: string | null; default_reasoning_effort: ReasoningEffort | null; }
+export interface ModelsResponse { items: ModelInfo[]; default: string | null; quick_model: string | null; default_reasoning_effort: ReasoningEffort | null; }
+export interface ProfilePreferencesInput { quick_model?: string | null; }
+export interface ProfilePreferencesResponse { quick_model: string | null; }
 export interface SyncChange { type: string; entity: Record<string, Json>; id: string; }
 export interface SyncResponse { changes: SyncChange[]; next_cursor: string; has_more: boolean; server_time: string; }
 export interface ConversationCreateInput { title?: string | null; model?: string | null; reasoning_effort?: ReasoningEffort | null; }
@@ -871,6 +897,10 @@ def typescript() -> str:
             elif operation == "readAllInbox":
                 lines.append(
                     f'  {operation}({", ".join(args)}): Promise<InboxReadAllResult> {{ return this.request<InboxReadAllResult>("{method.upper()}", this.path("{path}", {{ {", ".join(param_map)} }}), options); }}'
+                )
+            elif operation == "updatePreferences":
+                lines.append(
+                    f'  {operation}({", ".join(args)}): Promise<ProfilePreferencesResponse> {{ return this.request<ProfilePreferencesResponse>("{method.upper()}", this.path("{path}", {{ {", ".join(param_map)} }}), options); }}'
                 )
             else:
                 lines.append(

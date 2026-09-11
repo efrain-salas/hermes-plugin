@@ -112,6 +112,12 @@ global explícita. Los mismos campos en `PATCH /conversations/{id}` cambian
 únicamente esa conversación y nunca alteran el perfil. En un `PATCH`, enviar
 `reasoning_effort: null` elimina el override de la conversación.
 
+El modelo del modo rápido se configura aparte. `PATCH /preferences` con
+`{"quick_model": "<id>"}` guarda la preferencia de perfil (en `model.quick`),
+`{"quick_model": null}` la elimina y un id que ya no exista en el catálogo
+devuelve `model_unavailable`. `GET /models` expone `quick_model` con el valor
+efectivo.
+
 ## Modo rápido (quick)
 
 Las consultas simples (conocimiento general o respuestas que dependen de Internet)
@@ -145,6 +151,9 @@ El valor por defecto es `"full"`. `"mode": "quick"`:
   exponen `web_search` y `web_extract`). Sin MCP ni tools de terminal/archivos.
 - Fuerza el razonamiento desactivado, ignorando la preferencia
   `reasoning_effort` de la conversación.
+- Usa el modelo configurado en `quick_model` del perfil cuando existe; si no,
+  el modelo de la conversación/sesión. Un `quick_model` que ya no esté en el
+  catálogo se ignora y cae al de la sesión.
 - Usa como system prompt fecha/hora, la zona horaria y el idioma del dispositivo
   emparejado, más una instrucción de respuesta concisa.
 - No admite adjuntos (devuelve `400`), ni `steer` ni aprobaciones (devuelve `409`).

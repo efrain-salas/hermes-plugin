@@ -30,6 +30,7 @@ class FakeFacade:
         self.profile_preferences_data: dict[str, Any] = {
             "model": "mock-model",
             "provider": "mock",
+            "quick_model": None,
             "reasoning_effort": "medium",
         }
         self.counter = 0
@@ -272,16 +273,22 @@ class FakeFacade:
         update_model,
         reasoning_effort,
         update_reasoning,
+        quick_model=None,
+        update_quick_model=False,
     ):
         call = {
             "model": model,
             "update_model": update_model,
             "reasoning_effort": reasoning_effort,
             "update_reasoning": update_reasoning,
+            "quick_model": quick_model,
+            "update_quick_model": update_quick_model,
         }
         self.preference_updates.append(call)
         if update_model:
             self.profile_preferences_data["model"] = model
+        if update_quick_model:
+            self.profile_preferences_data["quick_model"] = quick_model
         if update_reasoning:
             self.profile_preferences_data["reasoning_effort"] = reasoning_effort
         return dict(self.profile_preferences_data)

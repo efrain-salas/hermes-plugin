@@ -48,6 +48,7 @@ from .schemas import (
     InboxConversationCreate,
     InboxReply,
     PairRequest,
+    ProfilePreferencesPatch,
     ReadRequest,
     RefreshRequest,
     RunCreate,
@@ -89,6 +90,12 @@ class MobileAPI:
             ("POST", "/auth/refresh", self.refresh, None),
             ("POST", "/auth/logout", self.logout, "devices:self"),
             ("GET", "/me", self.me, "conversations:read"),
+            (
+                "PATCH",
+                "/preferences",
+                self.update_preferences,
+                "conversations:write",
+            ),
             ("GET", "/devices", self.devices, "devices:self"),
             ("POST", "/devices", self.update_current_device, "devices:self"),
             ("PATCH", "/devices/{device_id}", self.patch_device, "devices:self"),
@@ -478,6 +485,7 @@ class MobileAPI:
             "default_reasoning_effort": preferences.get("reasoning_effort"),
             "preferences": {
                 "model": preferences.get("model") or default_model,
+                "quick_model": preferences.get("quick_model"),
                 "reasoning_effort": preferences.get("reasoning_effort"),
             },
             "limits": {"max_file_bytes": self.runtime.config.max_file_bytes},
@@ -611,6 +619,28 @@ class MobileAPI:
                 "scopes": subject["scopes"],
             }
         )
+
+    async def update_preferences(
+        self, request: web.Request, _subject: dict | None
+    ) -> web.Response:
+        profile = self._profile(request)
+        body = await self._body(request, ProfilePreferencesPatch)
+        update_quick_model = "quick_model" in body.model_fields_set
+        quick_model = body.quick_model.strip() if body.quick_model else None
+        if update_quick_model and quick_model is not None:
+            models = await self.runtime.facade.models(profile)
+            self._validate_model_selection(models, quick_model, None)
+        updated = await asyncio.to_thread(
+            self.runtime.profile_preferences.update,
+            self.runtime.profile_home(profile),
+            model=None,
+            update_model=False,
+            reasoning_effort=None,
+            update_reasoning=False,
+            quick_model=quick_model,
+            update_quick_model=update_quick_model,
+        )
+        return self._json({"quick_model": updated.get("quick_model")})
 
     @staticmethod
     def _device_resource(row: dict[str, Any], current: bool = False) -> dict[str, Any]:
@@ -1257,16 +1287,46 @@ class MobileAPI:
             run["public_id"],
         )
         timezone, locale = await self._device_context(subject)
+        quick_model = await self._profile_quick_model(profile)
         self.runtime.run_quick(
             profile,
             run["public_id"],
             conversation,
             "\n\n".join(texts),
+            model=quick_model or "",
             reasoning_effort=conversation.get("reasoning_effort"),
             timezone=timezone,
             locale=locale,
         )
         return self._json(resource, 202)
+
+    async def _profile_quick_model(self, profile: str) -> str | None:
+        """Effective quick-run model for the profile, validated against the catalog.
+
+        A stale preference (model removed from the provider) degrades to ``None`` so
+        the quick turn falls back to the conversation/session model instead of failing.
+        """
+        try:
+            preferences = await asyncio.to_thread(
+                self.runtime.profile_preferences.read,
+                self.runtime.profile_home(profile),
+            )
+        except Exception:
+            logger.warning("Could not read the profile quick model", exc_info=True)
+            return None
+        quick_model = preferences.get("quick_model")
+        if not quick_model:
+            return None
+        try:
+            models = await self.runtime.facade.models(profile)
+            self._validate_model_selection(models, quick_model, None)
+        except Exception:
+            logger.warning(
+                "Profile quick model %s is unavailable; using the session model",
+                quick_model,
+            )
+            return None
+        return str(quick_model)
 
     async def _device_context(
         self, subject: dict[str, Any] | None
@@ -2330,6 +2390,7 @@ class MobileAPI:
                     for item in data
                 ],
                 "default": default_model,
+                "quick_model": preferences.get("quick_model"),
                 "default_reasoning_effort": preferences.get("reasoning_effort"),
             }
         )

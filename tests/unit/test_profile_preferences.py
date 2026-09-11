@@ -68,21 +68,26 @@ def test_native_profile_preferences_preserve_provider_and_update_defaults(
         update_model=True,
         reasoning_effort="high",
         update_reasoning=True,
+        quick_model="quick-model",
+        update_quick_model=True,
     )
     assert updated == {
         "model": "new-model",
         "provider": "openai-codex",
+        "quick_model": "quick-model",
         "reasoning_effort": "high",
     }
     assert state["model"] == {
         "default": "new-model",
         "provider": "openai-codex",
         "base_url": "http://provider.test",
+        "quick": "quick-model",
     }
     assert state["agent"] == {"reasoning_effort": "high", "max_turns": 42}
     assert state["unrelated"] == {"keep": True}
     assert writes[-1] == {
         ("model", "default"),
+        ("model", "quick"),
         ("agent", "reasoning_effort"),
     }
 
@@ -92,8 +97,12 @@ def test_native_profile_preferences_preserve_provider_and_update_defaults(
         update_model=False,
         reasoning_effort=None,
         update_reasoning=True,
+        quick_model=None,
+        update_quick_model=True,
     )
     assert cleared["reasoning_effort"] is None
+    assert cleared["quick_model"] is None
     assert "reasoning_effort" not in state["agent"]
+    assert "quick" not in state["model"]
     assert scopes[0][0] == str(tmp_path)
     assert any(scope == "reset" for scope, _token in scopes)

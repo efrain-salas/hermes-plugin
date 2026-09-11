@@ -77,6 +77,10 @@ class ConversationPatch(StrictModel):
     reasoning_effort: ReasoningEffort | None = None
 
 
+class ProfilePreferencesPatch(StrictModel):
+    quick_model: str | None = Field(default=None, max_length=200)
+
+
 class ForkRequest(StrictModel):
     message_id: str
     title: str | None = Field(default=None, max_length=200)

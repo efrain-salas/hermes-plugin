@@ -7,7 +7,9 @@ export interface RunEvent { event_id: string; sequence: number; type: string; ru
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 export interface ModelReasoning { supported: boolean; can_disable: boolean | null; efforts: ReasoningEffort[]; }
 export interface ModelInfo { id: string; name: string; reasoning: ModelReasoning; }
-export interface ModelsResponse { items: ModelInfo[]; default: string | null; default_reasoning_effort: ReasoningEffort | null; }
+export interface ModelsResponse { items: ModelInfo[]; default: string | null; quick_model: string | null; default_reasoning_effort: ReasoningEffort | null; }
+export interface ProfilePreferencesInput { quick_model?: string | null; }
+export interface ProfilePreferencesResponse { quick_model: string | null; }
 export interface SyncChange { type: string; entity: Record<string, Json>; id: string; }
 export interface SyncResponse { changes: SyncChange[]; next_cursor: string; has_more: boolean; server_time: string; }
 export interface ConversationCreateInput { title?: string | null; model?: string | null; reasoning_effort?: ReasoningEffort | null; }
@@ -78,6 +80,7 @@ export class HermesMobileClient {
   refresh(options: RequestOptions = {}): Promise<unknown> { return this.request("POST", this.path("/p/{profile}/v1/mobile/auth/refresh", { profile: this.profile }), options); }
   logout(options: RequestOptions = {}): Promise<unknown> { return this.request("POST", this.path("/p/{profile}/v1/mobile/auth/logout", { profile: this.profile }), options); }
   me(options: RequestOptions = {}): Promise<unknown> { return this.request("GET", this.path("/p/{profile}/v1/mobile/me", { profile: this.profile }), options); }
+  updatePreferences(options: RequestOptions = {}): Promise<ProfilePreferencesResponse> { return this.request<ProfilePreferencesResponse>("PATCH", this.path("/p/{profile}/v1/mobile/preferences", { profile: this.profile }), options); }
   listDevices(options: RequestOptions = {}): Promise<unknown> { return this.request("GET", this.path("/p/{profile}/v1/mobile/devices", { profile: this.profile }), options); }
   upsertDevice(options: RequestOptions = {}): Promise<unknown> { return this.request("POST", this.path("/p/{profile}/v1/mobile/devices", { profile: this.profile }), options); }
   patchDevice(device_id: string, options: RequestOptions = {}): Promise<unknown> { return this.request("PATCH", this.path("/p/{profile}/v1/mobile/devices/{device_id}", { profile: this.profile, device_id: device_id }), options); }

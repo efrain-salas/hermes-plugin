@@ -40,9 +40,11 @@ class NativeProfilePreferences:
                     model_config.get("default") or model_config.get("model") or ""
                 ).strip()
                 provider = str(model_config.get("provider") or "").strip()
+                quick_model = str(model_config.get("quick") or "").strip()
             else:
                 default_model = str(model_config or "").strip()
                 provider = ""
+                quick_model = ""
 
             from hermes_constants import resolve_reasoning_config
 
@@ -56,6 +58,7 @@ class NativeProfilePreferences:
             return {
                 "model": default_model or None,
                 "provider": provider or None,
+                "quick_model": quick_model or None,
                 "reasoning_effort": effort,
             }
 
@@ -67,6 +70,8 @@ class NativeProfilePreferences:
         update_model: bool,
         reasoning_effort: str | None,
         update_reasoning: bool,
+        quick_model: str | None = None,
+        update_quick_model: bool = False,
     ) -> dict[str, Any]:
         with self._lock, self._scope(profile_home) as (load_config, save_config):
             config = load_config()
@@ -79,6 +84,17 @@ class NativeProfilePreferences:
                 model_config["default"] = str(model or "").strip()
                 config["model"] = model_config
                 preserve_keys.add(("model", "default"))
+
+            if update_quick_model:
+                model_config = config.get("model")
+                if not isinstance(model_config, dict):
+                    model_config = {"default": str(model_config or "").strip()}
+                if quick_model is None:
+                    model_config.pop("quick", None)
+                else:
+                    model_config["quick"] = str(quick_model).strip()
+                config["model"] = model_config
+                preserve_keys.add(("model", "quick"))
 
             if update_reasoning:
                 agent_config = config.get("agent")
@@ -103,6 +119,12 @@ class NativeProfilePreferences:
                     ).strip()
                 else:
                     stored_model = str(persisted_model or "").strip()
+                stored_quick = (
+                    persisted_model.get("quick")
+                    if isinstance(persisted_model, dict)
+                    else None
+                )
+                stored_quick = str(stored_quick).strip() if stored_quick else None
                 persisted_agent = persisted.get("agent")
                 stored_reasoning = (
                     persisted_agent.get("reasoning_effort")
@@ -114,6 +136,12 @@ class NativeProfilePreferences:
                     raise RuntimeError(
                         "Hermes did not persist the profile model preference"
                     )
+                if update_quick_model:
+                    expected_quick = str(quick_model).strip() if quick_model else None
+                    if stored_quick != expected_quick:
+                        raise RuntimeError(
+                            "Hermes did not persist the profile quick model preference"
+                        )
                 if update_reasoning and stored_reasoning != reasoning_effort:
                     raise RuntimeError(
                         "Hermes did not persist the profile reasoning preference"

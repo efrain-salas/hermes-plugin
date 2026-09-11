@@ -21,7 +21,7 @@ def test_generated_contract_is_current_and_complete():
         for path in document["paths"].values()
         for operation in path.values()
     }
-    assert len(operations) == 51
+    assert len(operations) == 52
     assert {
         "pair",
         "createRun",
@@ -29,6 +29,7 @@ def test_generated_contract_is_current_and_complete():
         "answerApproval",
         "uploadAttachment",
         "sync",
+        "updatePreferences",
         "listScheduledTasks",
         "listScheduledTaskRuns",
         "getScheduledRun",
@@ -58,6 +59,16 @@ def test_generated_contract_is_current_and_complete():
         == "#/components/schemas/SyncResponse"
     )
     assert schemas["SyncChange"]["required"] == ["type", "entity", "id"]
+    assert schemas["ModelsResponse"]["required"] == [
+        "items",
+        "default",
+        "quick_model",
+        "default_reasoning_effort",
+    ]
+    assert schemas["ProfilePreferencesInput"]["properties"]["quick_model"]["type"] == [
+        "string",
+        "null",
+    ]
     inbox_list = document["paths"]["/p/{profile}/v1/mobile/inbox"]["get"]
     assert {parameter["name"] for parameter in inbox_list["parameters"]} >= {
         "unread",

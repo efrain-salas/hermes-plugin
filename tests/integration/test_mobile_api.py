@@ -245,6 +245,7 @@ async def test_system_auth_devices_refresh_and_logout(client, runtime, auth):
     assert bootstrap_body["default_reasoning_effort"] == "medium"
     assert bootstrap_body["preferences"] == {
         "model": "mock-model",
+        "quick_model": None,
         "reasoning_effort": "medium",
     }
     cached = await client.get(
@@ -409,6 +410,8 @@ async def test_conversation_model_reasoning_and_profile_preference_scope(
             "update_model": True,
             "reasoning_effort": "high",
             "update_reasoning": True,
+            "quick_model": None,
+            "update_quick_model": False,
         }
     ]
     replay = await client.post(
@@ -436,6 +439,7 @@ async def test_conversation_model_reasoning_and_profile_preference_scope(
     assert fake_facade.profile_preferences_data == {
         "model": "mock-model-next",
         "provider": "mock",
+        "quick_model": None,
         "reasoning_effort": "high",
     }
 
@@ -619,6 +623,7 @@ async def test_attachment_run_sse_sync_models_and_toolsets(
             },
         ],
         "default": "mock-model",
+        "quick_model": None,
         "default_reasoning_effort": "medium",
     }
     toolsets = await client.get("/p/default/v1/mobile/toolsets", headers=headers)
@@ -1143,6 +1148,7 @@ async def test_quick_run_uses_light_agent_without_native_run(
     call = fake_quick_agent.calls[-1]
     assert call["session_id"].startswith("internal-default-")
     assert call["user_message"] == "¿Qué hora es?"
+    assert call["model"] == ""
     stream = await client.get(
         f"/p/default/v1/mobile/runs/{run['run_id']}/events", headers=headers
     )
@@ -1163,6 +1169,86 @@ async def test_quick_run_uses_light_agent_without_native_run(
     )
     assert replayed.headers["Idempotency-Replayed"] == "true"
     assert (await replayed.json())["run_id"] == run["run_id"]
+
+
+async def _wait_for_run(client, headers, run_id):
+    for _ in range(100):
+        response = await client.get(
+            f"/p/default/v1/mobile/runs/{run_id}", headers=headers
+        )
+        terminal = await response.json()
+        if terminal["status"] in {"completed", "failed", "cancelled"}:
+            return terminal
+        await asyncio.sleep(0.02)
+    return terminal
+
+
+async def test_profile_quick_model_preference(
+    client, runtime, fake_facade, fake_quick_agent, auth
+):
+    _, headers = auth
+
+    invalid = await client.patch(
+        "/p/default/v1/mobile/preferences",
+        headers=headers,
+        json={"quick_model": "does-not-exist"},
+    )
+    assert invalid.status == 400
+    assert (await invalid.json())["error"]["code"] == "model_unavailable"
+
+    updated = await client.patch(
+        "/p/default/v1/mobile/preferences",
+        headers=headers,
+        json={"quick_model": "mock-model-next"},
+    )
+    assert updated.status == 200, await updated.text()
+    assert (await updated.json())["quick_model"] == "mock-model-next"
+    assert fake_facade.profile_preferences_data["quick_model"] == "mock-model-next"
+
+    models = await client.get("/p/default/v1/mobile/models", headers=headers)
+    assert (await models.json())["quick_model"] == "mock-model-next"
+    bootstrap = await client.get("/p/default/v1/mobile/bootstrap", headers=headers)
+    assert (await bootstrap.json())["preferences"]["quick_model"] == "mock-model-next"
+
+    conversation = await _conversation(client, headers, "Quick model")
+    started = await client.post(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}/runs",
+        headers={**headers, "Idempotency-Key": "quick-model"},
+        json={
+            "client_message_id": "client-quick-model",
+            "input": [{"type": "text", "text": "hola"}],
+            "mode": "quick",
+        },
+    )
+    assert started.status == 202, await started.text()
+    run = await started.json()
+    terminal = await _wait_for_run(client, headers, run["run_id"])
+    assert terminal["status"] == "completed"
+    assert fake_quick_agent.calls[-1]["model"] == "mock-model-next"
+
+    # A stored model that disappeared from the catalog degrades to the session model.
+    fake_facade.profile_preferences_data["quick_model"] = "retired-model"
+    stale = await client.post(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}/runs",
+        headers={**headers, "Idempotency-Key": "quick-stale"},
+        json={
+            "client_message_id": "client-quick-stale",
+            "input": [{"type": "text", "text": "hola de nuevo"}],
+            "mode": "quick",
+        },
+    )
+    assert stale.status == 202, await stale.text()
+    stale_run = await stale.json()
+    await _wait_for_run(client, headers, stale_run["run_id"])
+    assert fake_quick_agent.calls[-1]["model"] == ""
+
+    cleared = await client.patch(
+        "/p/default/v1/mobile/preferences",
+        headers=headers,
+        json={"quick_model": None},
+    )
+    assert cleared.status == 200, await cleared.text()
+    assert (await cleared.json())["quick_model"] is None
 
 
 async def test_quick_run_failure_is_terminal(client, runtime, fake_quick_agent, auth):
