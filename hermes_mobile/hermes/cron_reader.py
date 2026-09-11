@@ -1,10 +1,28 @@
 from __future__ import annotations
 
 import contextlib
+import re
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+_RESPONSE_HEADING = re.compile(r"^## Response[ \t]*$", re.MULTILINE)
+
+
+def extract_response(text: str) -> str | None:
+    """Return only the final response section of a native cron output file.
+
+    Hermes writes the whole run transcript (job header, ``## Prompt``,
+    optional ``## Script Output`` and ``## Response``).  The mobile hub only
+    exposes the response, so strip everything that precedes the last response
+    heading.
+    """
+    matches = list(_RESPONSE_HEADING.finditer(text))
+    if not matches:
+        return None
+    response = text[matches[-1].end() :].strip()
+    return response or None
 
 
 class NativeCronReader:
@@ -72,11 +90,13 @@ class NativeCronReader:
         job_id: str,
         execution: dict[str, Any],
     ) -> str | None:
-        """Return the native output file closest to this execution's finish.
+        """Return the response of the native output file closest to this run.
 
         Hermes writes the output immediately before making the execution ledger
         terminal.  Matching by mtime avoids duplicating Hermes' output index or
-        relying on the locale-dependent filename timestamp.
+        relying on the locale-dependent filename timestamp.  Only the final
+        ``## Response`` section is returned so the hub never surfaces the job
+        prompt or intermediate transcript sections.
         """
         finished = execution.get("finished_at")
         if not isinstance(finished, str):
@@ -93,7 +113,7 @@ class NativeCronReader:
             # tolerance accommodates slow delivery without pairing unrelated runs.
             if abs(path.stat().st_mtime - target) > 300:
                 return None
-            return path.read_text(encoding="utf-8")
+            return extract_response(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
 

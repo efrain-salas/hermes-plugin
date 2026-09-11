@@ -6,7 +6,49 @@ import types
 from contextlib import contextmanager
 from datetime import UTC, datetime
 
-from hermes_mobile.hermes.cron_reader import NativeCronReader
+from hermes_mobile.hermes.cron_reader import NativeCronReader, extract_response
+
+
+def test_extract_response_returns_only_final_response_section():
+    transcript = (
+        "# Cron Job: Informe\n"
+        "\n"
+        "**Job ID:** job123\n"
+        "\n"
+        "## Prompt\n"
+        "\n"
+        "## Your previous run's output\n"
+        "\n"
+        "```\n"
+        "## Response\n"
+        "una respuesta anterior\n"
+        "```\n"
+        "\n"
+        "## Script Output\n"
+        "\n"
+        "```\n"
+        '{"wakeAgent": true}\n'
+        "```\n"
+        "\n"
+        "## Response\n"
+        "\n"
+        "## Grupo 4 — 11 de septiembre\n"
+        "\n"
+        "Sin novedades importantes hoy.\n"
+    )
+    assert extract_response(transcript) == (
+        "## Grupo 4 — 11 de septiembre\n\nSin novedades importantes hoy."
+    )
+
+
+def test_extract_response_without_response_returns_none():
+    transcript = (
+        "# Cron Job: Mantener WAHA activo\n"
+        "\n"
+        "**Status:** silent (empty output)\n"
+    )
+    assert extract_response(transcript) is None
+    assert extract_response("## Response\n\n   \n") is None
 
 
 def test_native_cron_reader_delegates_to_hermes_and_reads_native_output(
@@ -95,7 +137,21 @@ def test_native_cron_reader_delegates_to_hermes_and_reads_native_output(
     output_dir = tmp_path / "cron" / "output" / "job123"
     output_dir.mkdir(parents=True)
     output = output_dir / "2026-09-10_08-00-00.md"
-    output.write_text("native result", encoding="utf-8")
+    output.write_text(
+        "# Cron Job: Informe\n"
+        "\n"
+        "**Job ID:** job123\n"
+        "**Run Time:** 2026-09-10 08:00:00\n"
+        "\n"
+        "## Prompt\n"
+        "\n"
+        "Resume los mensajes pendientes.\n"
+        "\n"
+        "## Response\n"
+        "\n"
+        "native result\n",
+        encoding="utf-8",
+    )
     target = datetime(2026, 9, 10, 8, 0, 2, tzinfo=UTC).timestamp()
     os.utime(output, (target - 1, target - 1))
     assert reader.execution_output(tmp_path, "job123", execution) == "native result"
