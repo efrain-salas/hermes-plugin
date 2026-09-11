@@ -147,6 +147,11 @@ El valor por defecto es `"full"`. `"mode": "quick"`:
   emparejado, más una instrucción de respuesta concisa.
 - No admite adjuntos (devuelve `400`), ni `steer` ni aprobaciones (devuelve `409`).
   `POST /runs/{id}/cancel` interrumpe el agente in-process.
+- `POST /conversations/{id}/runs` y `GET /runs/{id}` devuelven `mode`, y
+  `GET /capabilities` expone `quick`, de modo que la app puede distinguir los turnos
+  rápidos y detectar cuándo una petición ha caído al flujo completo.
+- `POST /runs/{id}/retry` conserva el modo del run original (reintentar un turno
+  rápido vuelve a usar el agente in-process).
 - Si un reinicio del Gateway deja un run rápido sin terminar, el reconciliador lo
   marca `failed` con `quick_orphaned`.
 

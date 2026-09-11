@@ -235,7 +235,9 @@ async def test_system_auth_devices_refresh_and_logout(client, runtime, auth):
         "/p/default/v1/mobile/capabilities", headers=headers
     )
     assert capabilities.status == 200
-    assert (await capabilities.json())["streaming"] is True
+    capabilities_body = await capabilities.json()
+    assert capabilities_body["streaming"] is True
+    assert capabilities_body["quick"] is True
     bootstrap = await client.get("/p/default/v1/mobile/bootstrap", headers=headers)
     assert bootstrap.status == 200 and bootstrap.headers["ETag"]
     bootstrap_body = await bootstrap.json()
@@ -806,6 +808,7 @@ async def test_cancel_steer_approval_retry_and_sse_resume(
     assert (await retry_replay.json())["run_id"] == (await retried.json())["run_id"]
     await asyncio.sleep(0.1)
     retry_body = await retried.json()
+    assert retry_body["mode"] == "full"
     assert (
         await client.get(
             f"/p/default/v1/mobile/runs/{retry_body['run_id']}", headers=headers
@@ -1122,6 +1125,7 @@ async def test_quick_run_uses_light_agent_without_native_run(
     )
     assert started.status == 202, await started.text()
     run = await started.json()
+    assert run["mode"] == "quick"
     terminal = None
     for _ in range(100):
         status = await client.get(
@@ -1132,6 +1136,7 @@ async def test_quick_run_uses_light_agent_without_native_run(
             break
         await asyncio.sleep(0.02)
     assert terminal and terminal["status"] == "completed"
+    assert terminal["mode"] == "quick"
     # The quick turn never dispatches a native Hermes run.
     assert len(fake_facade.runs) == native_runs_before
     assert fake_quick_agent.calls, "quick agent was not invoked"
@@ -1189,6 +1194,37 @@ async def test_quick_run_failure_is_terminal(client, runtime, fake_quick_agent, 
         f"/p/default/v1/mobile/runs/{run['run_id']}/events", headers=headers
     )
     assert "event: run.failed" in await stream.text()
+
+
+async def test_retry_preserves_quick_mode(client, runtime, fake_quick_agent, auth):
+    _, headers = auth
+    conversation = await _conversation(client, headers, "Quick retry")
+    store = runtime.store("default")
+    failed = store.create_run(
+        conversation["id"], "quick_failed_manual", None, mode="quick"
+    )
+    store.update_run(failed["public_id"], "failed")
+    calls_before = len(fake_quick_agent.calls)
+    retried = await client.post(
+        f"/p/default/v1/mobile/runs/{failed['public_id']}/retry",
+        headers={**headers, "Idempotency-Key": "retry-quick"},
+    )
+    assert retried.status == 202, await retried.text()
+    body = await retried.json()
+    assert body["mode"] == "quick"
+    terminal = None
+    for _ in range(100):
+        status = await client.get(
+            f"/p/default/v1/mobile/runs/{body['run_id']}", headers=headers
+        )
+        terminal = await status.json()
+        if terminal["status"] in {"completed", "failed", "cancelled"}:
+            break
+        await asyncio.sleep(0.02)
+    assert terminal and terminal["status"] == "completed"
+    assert terminal["mode"] == "quick"
+    assert len(fake_quick_agent.calls) == calls_before + 1
+    assert "Reintenta el último turno" in fake_quick_agent.calls[-1]["user_message"]
 
 
 async def test_reconcile_fails_orphaned_quick_runs(runtime):

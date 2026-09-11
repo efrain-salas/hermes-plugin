@@ -21,7 +21,7 @@ export interface InboxConversationInput { title?: string | null; }
 export type RunMode = "full" | "quick";
 export interface RunCreateInput { client_message_id: string; input: Array<{ type: "text"; text: string } | { type: "attachment"; attachment_id: string }>; mode?: RunMode; }
 export interface InboxReplyInput { client_message_id: string; input: Array<{ type: "text"; text: string } | { type: "attachment"; attachment_id: string }>; conversation_title?: string | null; }
-export interface RunAccepted { run_id: string; conversation_id: string; user_message_id: string | null; status: string; events_url: string; }
+export interface RunAccepted { run_id: string; conversation_id: string; user_message_id: string | null; status: string; mode: RunMode; events_url: string; }
 export interface InboxReadAllResult { updated: number; }
 export interface RequestOptions { body?: unknown; query?: Record<string, string | number | boolean | undefined>; idempotencyKey?: string; signal?: AbortSignal; }
 export interface StreamOptions extends RequestOptions { lastEventId?: string; }

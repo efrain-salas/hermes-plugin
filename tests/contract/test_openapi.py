@@ -81,6 +81,8 @@ def test_generated_contract_is_current_and_complete():
         "$ref": "#/components/schemas/RunCreateInput"
     }
     assert schemas["RunCreateInput"]["properties"]["mode"]["enum"] == ["full", "quick"]
+    assert schemas["RunAccepted"]["properties"]["mode"]["enum"] == ["full", "quick"]
+    assert "mode" in schemas["RunAccepted"]["required"]
     assert any(
         parameter["name"] == "Idempotency-Key" and parameter["required"]
         for parameter in create_run["parameters"]
@@ -90,6 +92,7 @@ def test_generated_contract_is_current_and_complete():
     assert "replyToInboxItem(" in generated_client
     assert "): Promise<RunAccepted>" in generated_client
     assert 'export type RunMode = "full" | "quick";' in generated_client
+    assert "mode: RunMode;" in generated_client
 
 
 def test_every_error_response_uses_common_envelope():

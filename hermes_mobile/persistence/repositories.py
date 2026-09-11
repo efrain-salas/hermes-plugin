@@ -1608,6 +1608,7 @@ class ProfileStore(SQLiteStore):
             "id": row.get("public_id"),
             "conversation_id": row.get("conversation_id"),
             "status": row.get("status"),
+            "mode": row.get("mode") or "full",
             "started_at": row.get("started_at"),
             "completed_at": row.get("completed_at"),
             "final_message_id": row.get("final_message_id"),

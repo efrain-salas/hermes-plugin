@@ -438,6 +438,7 @@ class MobileAPI:
                 "attachments": self.runtime.config.files_enabled,
                 "approvals": True,
                 "steering": True,
+                "quick": self.runtime.config.quick_enabled,
                 "reasoning_summary": True,
                 "sync": True,
                 "inbox": True,
@@ -1154,7 +1155,7 @@ class MobileAPI:
                     store,
                     subject,
                     conversation,
-                    body,
+                    body.client_message_id,
                     texts,
                     idem_scope,
                     request_hash,
@@ -1219,25 +1220,28 @@ class MobileAPI:
         store: Any,
         subject: dict[str, Any] | None,
         conversation: dict[str, Any],
-        body: RunCreate | InboxReply,
+        client_message_id: str | None,
         texts: list[str],
         idem_scope: str,
         request_hash: str,
     ) -> web.Response:
         """Create a lightweight run served by the in-process quick agent."""
+        # Retried quick turns have no originating client message; synthesize one
+        # so the user turn is still persisted in the conversation history.
+        client_message_id = client_message_id or f"retry_{secrets.token_hex(8)}"
         hermes_run_id = f"quick_{secrets.token_hex(12)}"
         run = await asyncio.to_thread(
             store.create_run,
             conversation["public_id"],
             hermes_run_id,
-            body.client_message_id,
+            client_message_id,
             mode="quick",
         )
         await asyncio.to_thread(store.append_event, run["public_id"], "run.queued", {})
         user_message_id = await asyncio.to_thread(
             store.ensure_message,
             conversation["public_id"],
-            body.client_message_id,
+            client_message_id,
             "user",
             iso(),
             run["public_id"],
@@ -1287,6 +1291,7 @@ class MobileAPI:
             "conversation_id": run["conversation_id"],
             "user_message_id": run.get("user_message_id"),
             "status": run["status"],
+            "mode": run.get("mode") or "full",
             "events_url": f"/p/{profile}/v1/mobile/runs/{run['public_id']}/events",
         }
 
@@ -1487,6 +1492,20 @@ class MobileAPI:
         conversation = await asyncio.to_thread(
             store.conversation, run["conversation_id"]
         )
+        if run.get("mode") == "quick" and self.runtime.config.quick_enabled:
+            return await self._submit_quick_run(
+                profile,
+                store,
+                subject,
+                conversation,
+                None,
+                [
+                    "Reintenta el último turno fallido manteniendo el contexto "
+                    "de la conversación."
+                ],
+                idem_scope,
+                request_hash,
+            )
         remote = await self.runtime.facade.create_run(
             profile,
             {

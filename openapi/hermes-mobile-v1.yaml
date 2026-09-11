@@ -1870,6 +1870,7 @@ components:
       - conversation_id
       - user_message_id
       - status
+      - mode
       - events_url
       properties:
         run_id:
@@ -1882,6 +1883,14 @@ components:
           - 'null'
         status:
           type: string
+        mode:
+          type: string
+          enum:
+          - full
+          - quick
+          default: full
+          description: Echoes the mode the run was served with so clients can distinguish
+            quick turns and detect transparent fallback to the full flow.
         events_url:
           type: string
     InboxReadAllResult:
