@@ -50,6 +50,8 @@ def test_config_bounds_and_plugin_registration(tmp_path, monkeypatch):
     assert config.max_attachments_per_turn == 20
     assert config.push.enabled is False and config.push.timeout_seconds == 30
     assert config.files_enabled is False and config.ocr_enabled is True
+    assert config.quick_enabled is True
+    assert config.quick_toolsets == ("search", "web")
     assert config.plugin_root == tmp_path / "plugin-data" / "hermes-mobile"
     assert config.control_db == config.plugin_root / "control.db"
 

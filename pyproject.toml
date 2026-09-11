@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-mobile"
-version = "1.6.0"
+version = "1.7.0"
 description = "Secure, profile-scoped mobile API for Hermes Gateway"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"

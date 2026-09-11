@@ -40,7 +40,7 @@ class MobileConfig:
     files_enabled: bool = True
     ocr_enabled: bool = False
     quick_enabled: bool = True
-    quick_toolsets: tuple[str, ...] = ("search",)
+    quick_toolsets: tuple[str, ...] = ("search", "web")
     quick_max_iterations: int = 8
     quick_timeout_seconds: int = 180
 
@@ -65,14 +65,14 @@ class MobileConfig:
             files = {}
         if not isinstance(quick, Mapping):
             quick = {}
-        quick_toolsets = quick.get("toolsets", ("search",))
+        quick_toolsets = quick.get("toolsets", ("search", "web"))
         if isinstance(quick_toolsets, str):
             quick_toolsets = (quick_toolsets,)
         if not isinstance(quick_toolsets, (list, tuple)):
-            quick_toolsets = ("search",)
+            quick_toolsets = ("search", "web")
         quick_toolsets = tuple(
             str(name).strip() for name in quick_toolsets if str(name).strip()
-        ) or ("search",)
+        ) or ("search", "web")
         return cls(
             default_home=default_home,
             public_base_url=str(ctx.get_config("public_base_url", "") or "").rstrip(

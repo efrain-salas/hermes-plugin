@@ -141,8 +141,8 @@ El valor por defecto es `"full"`. `"mode": "quick"`:
 - Omite memoria (`MEMORY.md`/`USER.md` y proveedor externo), archivos de contexto
   (`SOUL.md`/`AGENTS.md`/`CLAUDE.md`), el índice de skills y la revisión
   automática de fin de turno.
-- Sólo habilita los toolsets de `quick.toolsets` (por defecto `search`, que expone
-  `web_search`). Sin MCP ni tools de terminal/archivos.
+- Sólo habilita los toolsets de `quick.toolsets` (por defecto `[search, web]`, que
+  exponen `web_search` y `web_extract`). Sin MCP ni tools de terminal/archivos.
 - Fuerza el razonamiento desactivado, ignorando la preferencia
   `reasoning_effort` de la conversación.
 - Usa como system prompt fecha/hora, la zona horaria y el idioma del dispositivo
@@ -166,7 +166,7 @@ plugins:
       settings:
         quick:
           enabled: true
-          toolsets: [search]   # "web" añade web_extract
+          toolsets: [search, web]   # "web" añade web_extract
           max_iterations: 8
           timeout_seconds: 180
 ```

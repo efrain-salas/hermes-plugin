@@ -1,7 +1,7 @@
 manifest_version: 1
 api_version: 1
 name: hermes-mobile
-version: 1.6.0
+version: 1.7.0
 description: Secure profile-scoped mobile API, scheduled tasks, attachments, sync and push for Hermes Gateway.
 author: Hermes Mobile contributors
 kind: standalone
@@ -55,7 +55,7 @@ config_schema:
     type: dict
     default:
       enabled: true
-      toolsets: [search]
+      toolsets: [search, web]
       max_iterations: 8
       timeout_seconds: 180
     description: >-
