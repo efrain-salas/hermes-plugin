@@ -183,7 +183,7 @@ async def test_stream_events_emits_light_agent_events() -> None:
     assert kwargs["session_id"] == "s1"
     assert kwargs["provider"] == "mock-provider"
     assert kwargs["base_url"] == "http://mock"
-    assert kwargs["reasoning_config"] == {"enabled": True, "effort": "low"}
+    assert kwargs["reasoning_config"] == {"enabled": False}
     assert kwargs["ephemeral_system_prompt"].startswith("Eres un asistente rápido")
 
 
@@ -225,7 +225,7 @@ async def test_stream_events_reasoning_disabled() -> None:
 async def test_stream_events_without_reasoning_effort() -> None:
     factory = FakeFactory()
     events = await _collect(_agent(factory), reasoning_effort=None)
-    assert "reasoning_config" not in factory.instances[0].kwargs
+    assert factory.instances[0].kwargs["reasoning_config"] == {"enabled": False}
     assert events[-1] == {"event": "run.completed", "usage": _USAGE}
 
 

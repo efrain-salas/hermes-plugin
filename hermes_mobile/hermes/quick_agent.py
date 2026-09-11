@@ -319,11 +319,9 @@ class NativeQuickAgent:
             if event:
                 emit(event)
 
-        reasoning_config = None
-        if reasoning_effort:
-            reasoning_config = {"enabled": reasoning_effort != "none"}
-            if reasoning_effort != "none":
-                reasoning_config["effort"] = reasoning_effort
+        # Quick turns never reason: the lightweight agent deliberately ignores
+        # the conversation's reasoning preference and always disables it.
+        reasoning_config = {"enabled": False}
 
         kwargs: dict[str, Any] = {
             "model": model,
@@ -342,8 +340,7 @@ class NativeQuickAgent:
             "stream_delta_callback": _delta,
             "tool_progress_callback": _tool,
         }
-        if reasoning_config:
-            kwargs["reasoning_config"] = reasoning_config
+        kwargs["reasoning_config"] = reasoning_config
         factory = self._agent_factory or self._default_agent_factory
         return factory(**kwargs)
 

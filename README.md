@@ -143,6 +143,8 @@ El valor por defecto es `"full"`. `"mode": "quick"`:
   automática de fin de turno.
 - Sólo habilita los toolsets de `quick.toolsets` (por defecto `search`, que expone
   `web_search`). Sin MCP ni tools de terminal/archivos.
+- Fuerza el razonamiento desactivado, ignorando la preferencia
+  `reasoning_effort` de la conversación.
 - Usa como system prompt fecha/hora, la zona horaria y el idioma del dispositivo
   emparejado, más una instrucción de respuesta concisa.
 - No admite adjuntos (devuelve `400`), ni `steer` ni aprobaciones (devuelve `409`).

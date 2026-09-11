@@ -676,9 +676,10 @@ def openapi() -> dict:
                             "default": "full",
                             "description": (
                                 "quick runs a lightweight in-process agent: no memory, "
-                                "context files, MCP or end-of-turn review, only the "
-                                "configured web-search toolsets. The turn still persists "
-                                "to the conversation history and streams the same events."
+                                "context files, MCP, end-of-turn review or reasoning, "
+                                "only the configured web-search toolsets. The turn still "
+                                "persists to the conversation history and streams the "
+                                "same events."
                             ),
                         },
                         "input": {
