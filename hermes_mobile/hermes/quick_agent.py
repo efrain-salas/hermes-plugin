@@ -118,6 +118,7 @@ class NativeQuickAgent:
         agent_factory: Any = None,
         session_loader: Any = None,
         profile_scope: Any = None,
+        runtime_resolver: Any = None,
     ):
         self.toolsets = tuple(toolsets)
         self.max_iterations = max_iterations
@@ -125,6 +126,7 @@ class NativeQuickAgent:
         self._agent_factory = agent_factory
         self._session_loader = session_loader
         self._profile_scope = profile_scope
+        self._runtime_resolver = runtime_resolver
 
     @staticmethod
     def _default_profile_scope(profile: str) -> Any:
@@ -132,6 +134,20 @@ class NativeQuickAgent:
         from hermes_cli.profiles import get_profile_dir
 
         return _profile_runtime_scope(get_profile_dir(profile))
+
+    @staticmethod
+    def _default_runtime_resolver(session_model: str) -> tuple[dict[str, Any], str]:
+        """Resolve provider credentials and the effective model for this profile.
+
+        Mirrors the API server's ``_create_agent``: without this the in-process
+        agent would build a client with no provider/base_url/api_key and the
+        upstream call fails. Must run inside the profile scope.
+        """
+        from gateway.run import _resolve_gateway_model, _resolve_runtime_agent_kwargs
+
+        runtime_kwargs = dict(_resolve_runtime_agent_kwargs() or {})
+        configured = runtime_kwargs.pop("model", None) or _resolve_gateway_model()
+        return runtime_kwargs, (session_model or configured)
 
     async def stream_events(
         self,
@@ -213,10 +229,13 @@ class NativeQuickAgent:
     ) -> None:
         scope_factory = self._profile_scope or self._default_profile_scope
         loader = self._session_loader or self._load_session
+        resolver = self._runtime_resolver or self._default_runtime_resolver
         with scope_factory(profile):
-            session_db, history, resolved_model = loader(session_id, model)
+            session_db, history, session_model = loader(session_id, model)
+            runtime_kwargs, resolved_model = resolver(session_model)
             agent = self._build_agent(
                 model=resolved_model,
+                runtime_kwargs=runtime_kwargs,
                 session_id=session_id,
                 session_db=session_db,
                 system_prompt=build_quick_system_prompt(timezone=timezone, locale=locale),
@@ -279,6 +298,7 @@ class NativeQuickAgent:
         self,
         *,
         model: str,
+        runtime_kwargs: dict[str, Any],
         session_id: str,
         session_db: Any,
         system_prompt: str,
@@ -302,6 +322,7 @@ class NativeQuickAgent:
 
         kwargs: dict[str, Any] = {
             "model": model,
+            **runtime_kwargs,
             "max_iterations": self.max_iterations,
             "quiet_mode": True,
             "verbose_logging": False,

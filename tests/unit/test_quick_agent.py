@@ -116,6 +116,12 @@ def _loader(session_id, model):
     return (None, [{"role": "user", "content": "anterior"}], model or "resolved-model")
 
 
+def _runtime_resolver(session_model):
+    return {"provider": "mock-provider", "base_url": "http://mock", "api_key": "k"}, (
+        session_model or "configured-model"
+    )
+
+
 def _scope(_profile):
     return contextlib.nullcontext()
 
@@ -128,6 +134,7 @@ def _agent(factory, *, timeout_seconds=30, loader=_loader):
         agent_factory=factory,
         session_loader=loader,
         profile_scope=_scope,
+        runtime_resolver=_runtime_resolver,
     )
 
 
@@ -167,6 +174,8 @@ async def test_stream_events_emits_light_agent_events() -> None:
     assert kwargs["skip_background_review"] is True
     assert kwargs["platform"] == "api_server"
     assert kwargs["session_id"] == "s1"
+    assert kwargs["provider"] == "mock-provider"
+    assert kwargs["base_url"] == "http://mock"
     assert kwargs["reasoning_config"] == {"enabled": True, "effort": "low"}
     assert kwargs["ephemeral_system_prompt"].startswith("Eres un asistente rápido")
 
@@ -269,6 +278,24 @@ def test_default_profile_scope_uses_hermes_modules(monkeypatch) -> None:
     with NativeQuickAgent._default_profile_scope("default"):
         pass
     assert calls == ["/home/default"]
+
+
+def test_default_runtime_resolver_prefers_session_model(monkeypatch) -> None:
+    gateway = types.ModuleType("gateway")
+    gateway.__path__ = []
+    gateway_run = types.ModuleType("gateway.run")
+    gateway_run._resolve_runtime_agent_kwargs = lambda: {
+        "provider": "p",
+        "model": "cfg-model",
+    }
+    gateway_run._resolve_gateway_model = lambda: "fallback"
+    monkeypatch.setitem(sys.modules, "gateway", gateway)
+    monkeypatch.setitem(sys.modules, "gateway.run", gateway_run)
+    kwargs, model = NativeQuickAgent._default_runtime_resolver("session-model")
+    assert kwargs == {"provider": "p"}
+    assert model == "session-model"
+    _kwargs, configured = NativeQuickAgent._default_runtime_resolver("")
+    assert configured == "cfg-model"
 
 
 def test_load_session_without_hermes_runtime() -> None:
