@@ -74,6 +74,10 @@ def test_quick_run_control_cancel_interrupts_attached_agent(monkeypatch) -> None
 
 
 class FakeAgent:
+    session_prompt_tokens = 123
+    session_completion_tokens = 45
+    session_total_tokens = 168
+
     def __init__(self, *, result=None, raise_exc=None, on_run=None, **kwargs):
         self.kwargs = kwargs
         self.result = result if result is not None else {
@@ -99,6 +103,9 @@ class FakeAgent:
         self.tool_progress_callback("reasoning.available", None, "resumen")
         self.tool_progress_callback("noise.event", "x")
         return self.result
+
+
+_USAGE = {"input_tokens": 123, "output_tokens": 45, "total_tokens": 168}
 
 
 class FakeFactory:
@@ -166,7 +173,7 @@ async def test_stream_events_emits_light_agent_events() -> None:
         "message.completed",
         "run.completed",
     ]
-    assert events[-1] == {"event": "run.completed"}
+    assert events[-1] == {"event": "run.completed", "usage": _USAGE}
     kwargs = factory.instances[0].kwargs
     assert kwargs["enabled_toolsets"] == ["search"]
     assert kwargs["skip_memory"] is True
@@ -212,14 +219,14 @@ async def test_stream_events_reasoning_disabled() -> None:
     events = await _collect(_agent(factory), reasoning_effort="none")
     assert factory.instances[0].kwargs["reasoning_config"] == {"enabled": False}
     assert "message.completed" not in [event["event"] for event in events]
-    assert events[-1] == {"event": "run.completed"}
+    assert events[-1] == {"event": "run.completed", "usage": _USAGE}
 
 
 async def test_stream_events_without_reasoning_effort() -> None:
     factory = FakeFactory()
     events = await _collect(_agent(factory), reasoning_effort=None)
     assert "reasoning_config" not in factory.instances[0].kwargs
-    assert events[-1] == {"event": "run.completed"}
+    assert events[-1] == {"event": "run.completed", "usage": _USAGE}
 
 
 def test_load_session_reads_history_and_model(monkeypatch) -> None:

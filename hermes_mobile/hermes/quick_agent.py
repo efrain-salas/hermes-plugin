@@ -254,6 +254,11 @@ class NativeQuickAgent:
                 if control is not None:
                     control.detach()
 
+        usage = {
+            "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
+            "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
+            "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
+        }
         if not isinstance(result, dict):
             result = {}
         if control is not None and control.cancelled:
@@ -269,7 +274,7 @@ class NativeQuickAgent:
         final = result.get("final_response")
         if isinstance(final, str) and final:
             emit({"event": "message.completed", "content": final})
-        emit({"event": "run.completed"})
+        emit({"event": "run.completed", "usage": usage})
 
     @staticmethod
     def _load_session(session_id: str, model: str) -> tuple[Any, list[dict[str, Any]], str]:
