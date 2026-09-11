@@ -1,5 +1,5 @@
 CONTROL_SCHEMA_VERSION = 3
-PROFILE_SCHEMA_VERSION = 4
+PROFILE_SCHEMA_VERSION = 5
 
 CONTROL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -157,6 +157,7 @@ CREATE TABLE IF NOT EXISTS runs (
     hermes_run_id TEXT NOT NULL UNIQUE,
     client_message_id TEXT,
     status TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'full',
     last_sequence INTEGER NOT NULL DEFAULT 0,
     final_message_id TEXT,
     error_code TEXT,

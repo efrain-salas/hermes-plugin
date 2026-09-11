@@ -619,10 +619,18 @@ class ControlStore(SQLiteStore):
             return [
                 dict(row)
                 for row in conn.execute(
-                    "SELECT * FROM devices WHERE user_id=? ORDER BY created_at",
+                    "SELECT * FROM devices WHERE user_id=? AND revoked_at IS NULL ORDER BY created_at",
                     (user_id,),
                 )
             ]
+
+    def get_device(self, device_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM devices WHERE id=? AND revoked_at IS NULL",
+                (device_id,),
+            ).fetchone()
+            return dict(row) if row else None
 
     def update_device(
         self, device_id: str, fields: dict[str, Any]
@@ -887,6 +895,11 @@ class ProfileStore(SQLiteStore):
                 "ALTER TABLE conversation_map ADD COLUMN reasoning_effort TEXT "
                 "CHECK(reasoning_effort IS NULL OR reasoning_effort IN "
                 "('none','minimal','low','medium','high','xhigh','max','ultra'))"
+            )
+        run_columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
+        if "mode" not in run_columns:
+            conn.execute(
+                "ALTER TABLE runs ADD COLUMN mode TEXT NOT NULL DEFAULT 'full'"
             )
 
     def ensure_conversation(
@@ -1495,7 +1508,12 @@ class ProfileStore(SQLiteStore):
         return self.transaction(_mark)
 
     def create_run(
-        self, conversation_id: str, hermes_run_id: str, client_message_id: str | None
+        self,
+        conversation_id: str,
+        hermes_run_id: str,
+        client_message_id: str | None,
+        *,
+        mode: str = "full",
     ) -> dict[str, Any]:
         row = {
             "public_id": new_id("run"),
@@ -1503,13 +1521,14 @@ class ProfileStore(SQLiteStore):
             "hermes_run_id": hermes_run_id,
             "client_message_id": client_message_id,
             "status": "queued",
+            "mode": "quick" if mode == "quick" else "full",
             "created_at": iso(),
         }
 
         def _create(conn: sqlite3.Connection) -> dict[str, Any]:
             conn.execute(
-                "INSERT INTO runs(public_id,conversation_id,hermes_run_id,client_message_id,status,created_at) "
-                "VALUES (:public_id,:conversation_id,:hermes_run_id,:client_message_id,:status,:created_at)",
+                "INSERT INTO runs(public_id,conversation_id,hermes_run_id,client_message_id,status,mode,created_at) "
+                "VALUES (:public_id,:conversation_id,:hermes_run_id,:client_message_id,:status,:mode,:created_at)",
                 row,
             )
             self._journal_conn(

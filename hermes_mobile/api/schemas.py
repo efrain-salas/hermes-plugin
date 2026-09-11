@@ -99,6 +99,7 @@ class AttachmentInput(StrictModel):
 class RunCreate(StrictModel):
     client_message_id: str = Field(min_length=1, max_length=128)
     input: list[TextInput | AttachmentInput] = Field(min_length=1, max_length=20)
+    mode: Literal["full", "quick"] = "full"
 
 
 class InboxConversationCreate(StrictModel):

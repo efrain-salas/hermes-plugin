@@ -73,10 +73,23 @@ def test_generated_contract_is_current_and_complete():
         parameter["name"] == "Idempotency-Key" and parameter["required"]
         for parameter in inbox_reply["parameters"]
     )
+    create_run = document["paths"][
+        "/p/{profile}/v1/mobile/conversations/{conversation_id}/runs"
+    ]["post"]
+    assert "202" in create_run["responses"] and "200" not in create_run["responses"]
+    assert create_run["requestBody"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/RunCreateInput"
+    }
+    assert schemas["RunCreateInput"]["properties"]["mode"]["enum"] == ["full", "quick"]
+    assert any(
+        parameter["name"] == "Idempotency-Key" and parameter["required"]
+        for parameter in create_run["parameters"]
+    )
     generated_client = (ROOT / "generated" / "hermes-mobile-client.ts").read_text()
     assert "sync(options: RequestOptions = {}): Promise<SyncResponse>" in generated_client
     assert "replyToInboxItem(" in generated_client
     assert "): Promise<RunAccepted>" in generated_client
+    assert 'export type RunMode = "full" | "quick";' in generated_client
 
 
 def test_every_error_response_uses_common_envelope():

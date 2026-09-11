@@ -521,9 +521,13 @@ paths:
         required: true
         schema:
           type: string
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
       responses:
-        '200':
-          description: Success
         '400':
           $ref: '#/components/responses/MobileError'
         '401':
@@ -532,6 +536,14 @@ paths:
           $ref: '#/components/responses/MobileError'
         '500':
           $ref: '#/components/responses/MobileError'
+        '202':
+          description: Run accepted as an asynchronous turn
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunAccepted'
+        '409':
+          $ref: '#/components/responses/MobileError'
       security:
       - mobileBearer: []
       requestBody:
@@ -539,8 +551,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: true
+              $ref: '#/components/schemas/RunCreateInput'
   /p/{profile}/v1/mobile/runs/{run_id}:
     get:
       operationId: getRun
@@ -1802,6 +1813,33 @@ components:
             const: attachment
           attachment_id:
             type: string
+    RunCreateInput:
+      type: object
+      additionalProperties: false
+      required:
+      - client_message_id
+      - input
+      properties:
+        client_message_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        mode:
+          type: string
+          enum:
+          - full
+          - quick
+          default: full
+          description: 'quick runs a lightweight in-process agent: no memory, context
+            files, MCP or end-of-turn review, only the configured web-search toolsets.
+            The turn still persists to the conversation history and streams the same
+            events.'
+        input:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/RunInputBlock'
     InboxReplyInput:
       type: object
       additionalProperties: false

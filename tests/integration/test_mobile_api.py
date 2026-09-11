@@ -715,6 +715,43 @@ async def test_remaining_device_and_validation_surface(client, runtime, auth):
     assert (await client.get("/p/default/v1/mobile/me", headers=headers)).status == 401
 
 
+async def test_paired_device_can_revoke_sibling_device(client, runtime):
+    first = await pair_client(client, runtime, installation_id="installation-first")
+    second = await pair_client(client, runtime, installation_id="installation-second")
+    headers = {"Authorization": f"Bearer {second['access_token']}"}
+
+    listed = await client.get("/p/default/v1/mobile/devices", headers=headers)
+    ids = {item["id"] for item in (await listed.json())["items"]}
+    assert {first["device_id"], second["device_id"]} <= ids
+
+    revoked = await client.delete(
+        f"/p/default/v1/mobile/devices/{first['device_id']}", headers=headers
+    )
+    assert revoked.status == 204
+
+    listed = await client.get("/p/default/v1/mobile/devices", headers=headers)
+    remaining = {item["id"] for item in (await listed.json())["items"]}
+    assert first["device_id"] not in remaining
+    assert second["device_id"] in remaining
+    assert (
+        await client.get(
+            "/p/default/v1/mobile/me",
+            headers={"Authorization": f"Bearer {first['access_token']}"},
+        )
+    ).status == 401
+
+
+async def test_device_cannot_revoke_device_from_another_profile(client, runtime):
+    default = await pair_client(client, runtime, installation_id="installation-default")
+    mujer = await pair_client(client, runtime, "mujer", "installation-mujer")
+    headers = {"Authorization": f"Bearer {default['access_token']}"}
+    forbidden = await client.delete(
+        f"/p/default/v1/mobile/devices/{mujer['device_id']}", headers=headers
+    )
+    assert forbidden.status == 404
+    assert runtime.control.get_device(mujer["device_id"]) is not None
+
+
 async def test_cancel_steer_approval_retry_and_sse_resume(
     client, runtime, fake_facade, auth
 ):
@@ -1066,3 +1103,105 @@ async def test_scheduled_task_hub_uses_native_cron_and_optional_conversation(
         ).fetchone()
     assert deletion["operation"] == "deleted"
     assert json.loads(deletion["payload_json"])["deleted_at"]
+
+
+async def test_quick_run_uses_light_agent_without_native_run(
+    client, runtime, fake_facade, fake_quick_agent, auth
+):
+    _, headers = auth
+    conversation = await _conversation(client, headers, "Quick chat")
+    native_runs_before = len(fake_facade.runs)
+    started = await client.post(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}/runs",
+        headers={**headers, "Idempotency-Key": "quick-one"},
+        json={
+            "client_message_id": "client-quick-one",
+            "input": [{"type": "text", "text": "¿Qué hora es?"}],
+            "mode": "quick",
+        },
+    )
+    assert started.status == 202, await started.text()
+    run = await started.json()
+    terminal = None
+    for _ in range(100):
+        status = await client.get(
+            f"/p/default/v1/mobile/runs/{run['run_id']}", headers=headers
+        )
+        terminal = await status.json()
+        if terminal["status"] in {"completed", "failed", "cancelled"}:
+            break
+        await asyncio.sleep(0.02)
+    assert terminal and terminal["status"] == "completed"
+    # The quick turn never dispatches a native Hermes run.
+    assert len(fake_facade.runs) == native_runs_before
+    assert fake_quick_agent.calls, "quick agent was not invoked"
+    call = fake_quick_agent.calls[-1]
+    assert call["session_id"].startswith("internal-default-")
+    assert call["user_message"] == "¿Qué hora es?"
+    stream = await client.get(
+        f"/p/default/v1/mobile/runs/{run['run_id']}/events", headers=headers
+    )
+    events = await stream.text()
+    assert "event: run.started" in events
+    assert "event: message.delta" in events
+    assert "event: tool.started" in events
+    assert "event: run.completed" in events
+
+    replayed = await client.post(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}/runs",
+        headers={**headers, "Idempotency-Key": "quick-one"},
+        json={
+            "client_message_id": "client-quick-one",
+            "input": [{"type": "text", "text": "¿Qué hora es?"}],
+            "mode": "quick",
+        },
+    )
+    assert replayed.headers["Idempotency-Replayed"] == "true"
+    assert (await replayed.json())["run_id"] == run["run_id"]
+
+
+async def test_quick_run_failure_is_terminal(client, runtime, fake_quick_agent, auth):
+    _, headers = auth
+    fake_quick_agent.fail = True
+    conversation = await _conversation(client, headers, "Quick fail")
+    started = await client.post(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}/runs",
+        headers={**headers, "Idempotency-Key": "quick-fail"},
+        json={
+            "client_message_id": "client-quick-fail",
+            "input": [{"type": "text", "text": "boom"}],
+            "mode": "quick",
+        },
+    )
+    assert started.status == 202, await started.text()
+    run = await started.json()
+    terminal = None
+    for _ in range(100):
+        status = await client.get(
+            f"/p/default/v1/mobile/runs/{run['run_id']}", headers=headers
+        )
+        terminal = await status.json()
+        if terminal["status"] in {"completed", "failed", "cancelled"}:
+            break
+        await asyncio.sleep(0.02)
+    assert terminal and terminal["status"] == "failed"
+    stream = await client.get(
+        f"/p/default/v1/mobile/runs/{run['run_id']}/events", headers=headers
+    )
+    assert "event: run.failed" in await stream.text()
+
+
+async def test_reconcile_fails_orphaned_quick_runs(runtime):
+    store = runtime.store("default")
+    conversation = store.ensure_conversation("orphan-session")
+    orphan = store.create_run(
+        conversation["public_id"], "quick_orphan", None, mode="quick"
+    )
+    live = store.create_run(
+        conversation["public_id"], "quick_live", None, mode="quick"
+    )
+    runtime._quick_controls[live["public_id"]] = object()
+    await runtime._reconcile_quick_runs(store)
+    assert store.run(orphan["public_id"])["status"] == "failed"
+    assert store.run(orphan["public_id"])["error_code"] == "quick_orphaned"
+    assert store.run(live["public_id"])["status"] == "queued"

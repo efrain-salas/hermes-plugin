@@ -9,6 +9,8 @@ independiente del dashboard de Hermes, para crear emparejamientos protegidos con
 - Python 3.11–3.13.
 - Hermes Agent probado contra `bf53ff00a7360826ec2c9e2949533160068a8fc8`.
 - `gateway.multiplex_profiles: true` y API Server de Hermes habilitado.
+- El modo rápido usa la clase interna `AIAgent` de Hermes en el proceso del
+  Gateway; si no está disponible cae de forma transparente al flujo completo.
 - SQLite con WAL; `aiohttp`; tokens Ed25519.
 
 ## Instalación
@@ -110,6 +112,68 @@ global explícita. Los mismos campos en `PATCH /conversations/{id}` cambian
 únicamente esa conversación y nunca alteran el perfil. En un `PATCH`, enviar
 `reasoning_effort: null` elimina el override de la conversación.
 
+## Modo rápido (quick)
+
+Las consultas simples (conocimiento general o respuestas que dependen de Internet)
+no necesitan el harness completo de Hermes: memoria, archivos de contexto, skills,
+MCP y la revisión de fin de turno. El modo rápido ejecuta el turno con un agente
+in-process reducido y sólo las tools de búsqueda web configuradas.
+
+La app decide por turno con el campo `mode` de `POST /conversations/{id}/runs`:
+
+```json
+{
+  "client_message_id": "msg-123",
+  "input": [{"type": "text", "text": "¿Cuál es la capital de Francia?"}],
+  "mode": "quick"
+}
+```
+
+El valor por defecto es `"full"`. `"mode": "quick"`:
+
+- Crea el run en el historial con el mismo ciclo de vida que un run normal
+  (`run.queued` → `run.started` → `message.delta`/`tool.*` → `run.completed`),
+  la misma SSE en `/runs/{id}/events`, el mismo `/sync`, unread y push.
+- Persiste los turnos en la **misma sesión nativa**, por lo que la conversación
+  aparece en `/conversations` y sus mensajes en `/messages` como cualquier otra.
+  Un turno rápido puede continuarse después en modo `full` (y viceversa): el
+  historial se carga desde la sesión nativa.
+- Omite memoria (`MEMORY.md`/`USER.md` y proveedor externo), archivos de contexto
+  (`SOUL.md`/`AGENTS.md`/`CLAUDE.md`), el índice de skills y la revisión
+  automática de fin de turno.
+- Sólo habilita los toolsets de `quick.toolsets` (por defecto `search`, que expone
+  `web_search`). Sin MCP ni tools de terminal/archivos.
+- Usa como system prompt fecha/hora, la zona horaria y el idioma del dispositivo
+  emparejado, más una instrucción de respuesta concisa.
+- No admite adjuntos (devuelve `400`), ni `steer` ni aprobaciones (devuelve `409`).
+  `POST /runs/{id}/cancel` interrumpe el agente in-process.
+- Si un reinicio del Gateway deja un run rápido sin terminar, el reconciliador lo
+  marca `failed` con `quick_orphaned`.
+
+Configuración (bloque `quick` en `plugins.entries.hermes-mobile`):
+
+```yaml
+plugins:
+  entries:
+    hermes-mobile:
+      settings:
+        quick:
+          enabled: true
+          toolsets: [search]   # "web" añade web_extract
+          max_iterations: 8
+          timeout_seconds: 180
+```
+
+Si `quick.enabled` es `false`, una petición `mode: "quick"` cae de forma
+transparente al flujo completo.
+
+Internamente el plugin construye un `AIAgent` en el proceso del Gateway con
+`skip_memory`, `skip_context_files`, `skip_background_review`, `enabled_toolsets`
+acotado y `ephemeral_system_prompt`, dentro del scope del perfil multiplexado, y
+reutiliza el mismo bucle de eventos del store que los runs nativos. Esto depende
+de la API interna del `AIAgent` de Hermes; si esa API no está disponible en la
+versión instalada, la petición cae al flujo nativo completo.
+
 ## Hub de tareas programadas
 
 La API móvil proyecta el CRON nativo de Hermes en `/v1/mobile/scheduled-tasks`. Hermes sigue siendo
@@ -205,8 +269,8 @@ docker compose -f docker-compose.test.yml up --build --abort-on-container-exit -
 La segunda orden levanta un Hermes real con perfiles `default` y `mujer`, un proveedor LLM compatible
 simulado y Expo Push simulado. Comprueba además el portal raíz y una ceremonia WebAuthn real hasta la
 entrega de opciones de registro. Ejecuta pairing, aislamiento cruzado, conversaciones, run real, SSE,
-adjuntos, sync, push, CLI y fallos de dependencias. El contenedor `tests` falla si el Gateway deja de estar
-vivo durante las pruebas de resiliencia.
+adjuntos, sync, push, CLI, modo rápido y fallos de dependencias. El contenedor `tests` falla si el Gateway
+deja de estar vivo durante las pruebas de resiliencia.
 
 El contrato está en `openapi/hermes-mobile-v1.yaml`; el cliente Expo generado vive en
 `generated/hermes-mobile-client.ts`. CI comprueba que el generador no deja cambios y que TypeScript

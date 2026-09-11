@@ -239,6 +239,30 @@ def openapi() -> dict:
             item["responses"]["409"] = {
                 "$ref": "#/components/responses/MobileError"
             }
+        if operation == "createRun":
+            item["requestBody"]["content"]["application/json"]["schema"] = {
+                "$ref": "#/components/schemas/RunCreateInput"
+            }
+            item["parameters"].append(
+                {
+                    "name": "Idempotency-Key",
+                    "in": "header",
+                    "required": True,
+                    "schema": {"type": "string", "minLength": 1},
+                }
+            )
+            item["responses"].pop("200")
+            item["responses"]["202"] = {
+                "description": "Run accepted as an asynchronous turn",
+                "content": {
+                    "application/json": {
+                        "schema": {"$ref": "#/components/schemas/RunAccepted"}
+                    }
+                },
+            }
+            item["responses"]["409"] = {
+                "$ref": "#/components/responses/MobileError"
+            }
         if operation == "createInboxConversation":
             item["responses"]["200"]["description"] = "Existing linked conversation"
             item["responses"]["201"] = {"description": "Conversation created and linked"}
@@ -636,6 +660,35 @@ def openapi() -> dict:
                         },
                     ]
                 },
+                "RunCreateInput": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["client_message_id", "input"],
+                    "properties": {
+                        "client_message_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["full", "quick"],
+                            "default": "full",
+                            "description": (
+                                "quick runs a lightweight in-process agent: no memory, "
+                                "context files, MCP or end-of-turn review, only the "
+                                "configured web-search toolsets. The turn still persists "
+                                "to the conversation history and streams the same events."
+                            ),
+                        },
+                        "input": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 20,
+                            "items": {"$ref": "#/components/schemas/RunInputBlock"},
+                        },
+                    },
+                },
                 "InboxReplyInput": {
                     "type": "object",
                     "additionalProperties": False,
@@ -707,6 +760,8 @@ export interface InboxAction { type: InboxActionType; conversation_id?: string; 
 export interface InboxItem { id: string; kind: string; severity: InboxSeverity; title: string; body: string; source: { type: string; id: string | null }; conversation_id: string | null; context: Record<string, Json>; actions: InboxAction[]; unread: boolean; resolved: boolean; occurred_at: string; read_at: string | null; resolved_at: string | null; updated_at: string; }
 export interface InboxPage { items: InboxItem[]; next_cursor: string | null; has_more: boolean; unread_count: number; }
 export interface InboxConversationInput { title?: string | null; }
+export type RunMode = "full" | "quick";
+export interface RunCreateInput { client_message_id: string; input: Array<{ type: "text"; text: string } | { type: "attachment"; attachment_id: string }>; mode?: RunMode; }
 export interface InboxReplyInput { client_message_id: string; input: Array<{ type: "text"; text: string } | { type: "attachment"; attachment_id: string }>; conversation_title?: string | null; }
 export interface RunAccepted { run_id: string; conversation_id: string; user_message_id: string | null; status: string; events_url: string; }
 export interface InboxReadAllResult { updated: number; }
@@ -794,6 +849,10 @@ def typescript() -> str:
                     f'  {operation}({", ".join(args)}): Promise<InboxItem> {{ return this.request<InboxItem>("{method.upper()}", this.path("{path}", {{ {", ".join(param_map)} }}), options); }}'
                 )
             elif operation == "replyToInboxItem":
+                lines.append(
+                    f'  {operation}({", ".join(args)}): Promise<RunAccepted> {{ return this.request<RunAccepted>("{method.upper()}", this.path("{path}", {{ {", ".join(param_map)} }}), options); }}'
+                )
+            elif operation == "createRun":
                 lines.append(
                     f'  {operation}({", ".join(args)}): Promise<RunAccepted> {{ return this.request<RunAccepted>("{method.upper()}", this.path("{path}", {{ {", ".join(param_map)} }}), options); }}'
                 )

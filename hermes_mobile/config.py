@@ -39,6 +39,10 @@ class MobileConfig:
     push: PushConfig = field(default_factory=PushConfig)
     files_enabled: bool = True
     ocr_enabled: bool = False
+    quick_enabled: bool = True
+    quick_toolsets: tuple[str, ...] = ("search",)
+    quick_max_iterations: int = 8
+    quick_timeout_seconds: int = 180
 
     @classmethod
     def from_context(cls, ctx: Any) -> MobileConfig:
@@ -54,10 +58,21 @@ class MobileConfig:
             default_home = default_home.parent.parent
         push = ctx.get_config("push", {}) or {}
         files = ctx.get_config("files", {}) or {}
+        quick = ctx.get_config("quick", {}) or {}
         if not isinstance(push, Mapping):
             push = {}
         if not isinstance(files, Mapping):
             files = {}
+        if not isinstance(quick, Mapping):
+            quick = {}
+        quick_toolsets = quick.get("toolsets", ("search",))
+        if isinstance(quick_toolsets, str):
+            quick_toolsets = (quick_toolsets,)
+        if not isinstance(quick_toolsets, (list, tuple)):
+            quick_toolsets = ("search",)
+        quick_toolsets = tuple(
+            str(name).strip() for name in quick_toolsets if str(name).strip()
+        ) or ("search",)
         return cls(
             default_home=default_home,
             public_base_url=str(ctx.get_config("public_base_url", "") or "").rstrip(
@@ -102,6 +117,14 @@ class MobileConfig:
             ),
             files_enabled=bool(files.get("enabled", True)),
             ocr_enabled=bool(files.get("ocr_enabled", False)),
+            quick_enabled=bool(quick.get("enabled", True)),
+            quick_toolsets=quick_toolsets,
+            quick_max_iterations=_bounded_int(
+                quick.get("max_iterations", 8), 8, 1, 50
+            ),
+            quick_timeout_seconds=_bounded_int(
+                quick.get("timeout_seconds", 180), 180, 10, 900
+            ),
         )
 
     @property

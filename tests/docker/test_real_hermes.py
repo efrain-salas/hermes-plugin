@@ -326,6 +326,52 @@ async def test_real_multiplexed_hermes_mobile_surface():
         assert pushes[0]["data"]["profile"] == "default"
         assert pushes[0]["data"]["conversation_id"] == default_conv["id"]
 
+        # Quick turns run an in-process lightweight agent (no memory, context
+        # files, MCP or review) but still persist to the same native session, so
+        # they appear in the conversation history like any other turn.
+        messages_before = len(
+            (
+                await client.get(
+                    f"/p/default/v1/mobile/conversations/{default_conv['id']}/messages",
+                    headers=default_headers,
+                )
+            ).json()["items"]
+        )
+        quick_response = await client.post(
+            f"/p/default/v1/mobile/conversations/{default_conv['id']}/runs",
+            headers={**default_headers, "Idempotency-Key": str(uuid.uuid4())},
+            json={
+                "client_message_id": str(uuid.uuid4()),
+                "input": [{"type": "text", "text": "¿Cuál es la capital de Francia?"}],
+                "mode": "quick",
+            },
+        )
+        assert quick_response.status_code == 202, quick_response.text
+        quick = quick_response.json()
+        quick_terminal = await _wait_run(
+            client, "default", default_token, quick["run_id"]
+        )
+        assert quick_terminal["status"] == "completed", quick_terminal
+        quick_stream = await client.get(
+            f"/p/default/v1/mobile/runs/{quick['run_id']}/events",
+            headers=default_headers,
+        )
+        assert (
+            "event: run.started" in quick_stream.text
+            and "event: run.completed" in quick_stream.text
+        )
+        messages_after = (
+            await client.get(
+                f"/p/default/v1/mobile/conversations/{default_conv['id']}/messages",
+                headers=default_headers,
+            )
+        ).json()["items"]
+        assert len(messages_after) > messages_before
+        assert any(
+            "Hermes real respondió" in json.dumps(item, ensure_ascii=False)
+            for item in messages_after
+        )
+
         # The hub projects Hermes' real job store, execution ledger and output
         # files. An inherited API origin is normalized before the task fires.
         native_job = await client.post(

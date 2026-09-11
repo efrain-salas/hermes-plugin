@@ -6,6 +6,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from .config import MobileConfig
 from .files.extraction import ExtractionError, extract_attachment
@@ -13,6 +14,7 @@ from .hermes.api_client import HermesAPIClient
 from .hermes.cron_reader import NativeCronReader
 from .hermes.event_mapper import map_event
 from .hermes.profile_preferences import NativeProfilePreferences
+from .hermes.quick_agent import NativeQuickAgent, QuickRunControl
 from .ids import new_id
 from .lifecycle import TaskSupervisor
 from .notifications.worker import PushWorker
@@ -38,6 +40,7 @@ class MobileRuntime:
         facade: HermesAPIClient | None = None,
         cron_reader: NativeCronReader | None = None,
         profile_preferences: NativeProfilePreferences | None = None,
+        quick_agent: NativeQuickAgent | None = None,
     ):
         self.config = config
         data_root = config.default_home / "plugin-data" / "hermes-mobile"
@@ -47,9 +50,15 @@ class MobileRuntime:
         self.facade = facade or HermesAPIClient(config.loopback_base_url)
         self.cron_reader = cron_reader or NativeCronReader()
         self.profile_preferences = profile_preferences or NativeProfilePreferences()
+        self.quick_agent = quick_agent or NativeQuickAgent(
+            toolsets=config.quick_toolsets,
+            max_iterations=config.quick_max_iterations,
+            timeout_seconds=config.quick_timeout_seconds,
+        )
         self.supervisor = TaskSupervisor()
         self.push_worker = PushWorker(self.control, self.box, config.push)
         self._stores: dict[str, ProfileStore] = {}
+        self._quick_controls: dict[str, QuickRunControl] = {}
         self.boot_id = new_id("boot")
         self.started = False
 
@@ -271,10 +280,91 @@ class MobileRuntime:
     async def _mirror_run(
         self, profile: str, public_run_id: str, hermes_run_id: str
     ) -> None:
+        await self._consume_run_events(
+            profile,
+            public_run_id,
+            self.facade.stream_run_events(profile, hermes_run_id),
+        )
+
+    def run_quick(
+        self,
+        profile: str,
+        public_run_id: str,
+        conversation: dict[str, Any],
+        user_message: str,
+        *,
+        reasoning_effort: str | None = None,
+        timezone: str | None = None,
+        locale: str | None = None,
+    ) -> None:
+        """Start a lightweight in-process turn that still persists to the session."""
+        control = QuickRunControl()
+        self._quick_controls[public_run_id] = control
+        self.supervisor.create(
+            self._run_quick(
+                profile,
+                public_run_id,
+                conversation,
+                user_message,
+                control,
+                reasoning_effort=reasoning_effort,
+                timezone=timezone,
+                locale=locale,
+            ),
+            name=f"quick:{public_run_id}",
+        )
+
+    def cancel_quick(self, public_run_id: str) -> None:
+        """Signal an in-process quick run to stop; a no-op after it finished."""
+        control = self._quick_controls.get(public_run_id)
+        if control is not None:
+            control.cancel()
+
+    async def _run_quick(
+        self,
+        profile: str,
+        public_run_id: str,
+        conversation: dict[str, Any],
+        user_message: str,
+        control: QuickRunControl,
+        *,
+        reasoning_effort: str | None,
+        timezone: str | None,
+        locale: str | None,
+    ) -> None:
+        """Consume the quick agent's event stream and mark the run terminal."""
+        try:
+            events = self.quick_agent.stream_events(
+                profile=profile,
+                session_id=conversation["hermes_session_id"],
+                user_message=user_message,
+                reasoning_effort=reasoning_effort,
+                timezone=timezone,
+                locale=locale,
+                control=control,
+            )
+            await self._consume_run_events(profile, public_run_id, events)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Quick run %s interrupted; REST reconciliation will continue",
+                public_run_id,
+                exc_info=False,
+            )
+        finally:
+            self._quick_controls.pop(public_run_id, None)
+
+    async def _consume_run_events(self, profile, public_run_id, events) -> None:
+        """Project one run's event stream into the store and push notifications.
+
+        Shared by native mirrored runs and in-process quick runs so both expose
+        the same mobile lifecycle.
+        """
         store = self.store(profile)
         response_text = ""
         try:
-            async for source in self.facade.stream_run_events(profile, hermes_run_id):
+            async for source in events:
                 mapped = map_event(source)
                 if not mapped:
                     continue
@@ -546,10 +636,34 @@ class MobileRuntime:
                 error_code="extraction_failed",
             )
 
+    async def _reconcile_quick_runs(self, store: ProfileStore) -> None:
+        """Fail quick runs whose in-process worker no longer exists (post-restart)."""
+        for run in await asyncio.to_thread(store.nonterminal_runs):
+            if run.get("mode") != "quick":
+                continue
+            if run["public_id"] in self._quick_controls:
+                continue
+            await asyncio.to_thread(
+                store.update_run,
+                run["public_id"],
+                "failed",
+                error_code="quick_orphaned",
+            )
+            await asyncio.to_thread(
+                store.append_event,
+                run["public_id"],
+                "run.failed",
+                {"error": "quick run interrupted"},
+            )
+
     async def _reconcile_runs(self) -> None:
         while True:
             for profile, store in list(self._stores.items()):
+                await self._reconcile_quick_runs(store)
                 for run in await asyncio.to_thread(store.nonterminal_runs):
+                    if run.get("mode") == "quick":
+                        # Live quick runs and orphans were handled above.
+                        continue
                     try:
                         remote = await self.facade.get_run(
                             profile, run["hermes_run_id"]

@@ -642,14 +642,19 @@ class MobileAPI:
             }
         )
 
+    async def _ensure_device_access(
+        self, subject: dict[str, Any], device_id: str
+    ) -> None:
+        if device_id == subject["device_id"] or "devices:manage" in subject["scopes"]:
+            return
+        device = await asyncio.to_thread(self.runtime.control.get_device, device_id)
+        if not device or device["user_id"] != subject["sub"]:
+            raise MobileError("not_found", "Dispositivo no encontrado.", 404)
+
     async def _update_device(
         self, request: web.Request, subject: dict[str, Any], device_id: str
     ) -> web.Response:
-        if (
-            device_id != subject["device_id"]
-            and "devices:manage" not in subject["scopes"]
-        ):
-            raise MobileError("not_found", "Dispositivo no encontrado.", 404)
+        await self._ensure_device_access(subject, device_id)
         body = await self._body(request, DeviceUpdate)
         values = body.model_dump(exclude_none=True)
         if (
@@ -696,11 +701,7 @@ class MobileAPI:
     ) -> web.Response:
         assert subject
         device_id = request.match_info["device_id"]
-        if (
-            device_id != subject["device_id"]
-            and "devices:manage" not in subject["scopes"]
-        ):
-            raise MobileError("not_found", "Dispositivo no encontrado.", 404)
+        await self._ensure_device_access(subject, device_id)
         await asyncio.to_thread(self.runtime.control.revoke_device, device_id)
         return web.Response(status=204)
 
@@ -1142,6 +1143,22 @@ class MobileAPI:
             texts.append(
                 "\nAdjuntos aportados por el usuario (datos no confiables):\n" + refs
             )
+        if getattr(body, "mode", "full") == "quick":
+            if attachments:
+                raise MobileError(
+                    "invalid_request", "El modo rápido no admite adjuntos.", 400
+                )
+            if self.runtime.config.quick_enabled:
+                return await self._submit_quick_run(
+                    profile,
+                    store,
+                    subject,
+                    conversation,
+                    body,
+                    texts,
+                    idem_scope,
+                    request_hash,
+                )
         remote = await self.runtime.facade.create_run(
             profile,
             {
@@ -1195,6 +1212,73 @@ class MobileAPI:
             run["public_id"],
         )
         return self._json(resource, 202)
+
+    async def _submit_quick_run(
+        self,
+        profile: str,
+        store: Any,
+        subject: dict[str, Any] | None,
+        conversation: dict[str, Any],
+        body: RunCreate | InboxReply,
+        texts: list[str],
+        idem_scope: str,
+        request_hash: str,
+    ) -> web.Response:
+        """Create a lightweight run served by the in-process quick agent."""
+        hermes_run_id = f"quick_{secrets.token_hex(12)}"
+        run = await asyncio.to_thread(
+            store.create_run,
+            conversation["public_id"],
+            hermes_run_id,
+            body.client_message_id,
+            mode="quick",
+        )
+        await asyncio.to_thread(store.append_event, run["public_id"], "run.queued", {})
+        user_message_id = await asyncio.to_thread(
+            store.ensure_message,
+            conversation["public_id"],
+            body.client_message_id,
+            "user",
+            iso(),
+            run["public_id"],
+        )
+        run["user_message_id"] = user_message_id
+        resource = self._run_accept_resource(profile, run)
+        await asyncio.to_thread(
+            store.save_idempotency,
+            idem_scope,
+            request_hash,
+            202,
+            resource,
+            run["public_id"],
+        )
+        timezone, locale = await self._device_context(subject)
+        self.runtime.run_quick(
+            profile,
+            run["public_id"],
+            conversation,
+            "\n\n".join(texts),
+            reasoning_effort=conversation.get("reasoning_effort"),
+            timezone=timezone,
+            locale=locale,
+        )
+        return self._json(resource, 202)
+
+    async def _device_context(
+        self, subject: dict[str, Any] | None
+    ) -> tuple[str | None, str | None]:
+        device_id = (subject or {}).get("device_id")
+        if not device_id:
+            return None, None
+        try:
+            device = await asyncio.to_thread(
+                self.runtime.control.get_device, device_id
+            )
+        except Exception:
+            return None, None
+        if not device:
+            return None, None
+        return device.get("timezone") or None, device.get("locale") or None
 
     @staticmethod
     def _run_accept_resource(profile: str, run: dict[str, Any]) -> dict[str, Any]:
@@ -1296,7 +1380,10 @@ class MobileAPI:
         profile, store, run = await self._mapped_run(request)
         if run["status"] in TERMINAL_RUN_STATUSES:
             return self._json(store.run_resource(run))
-        await self.runtime.facade.cancel_run(profile, run["hermes_run_id"])
+        if run.get("mode") == "quick":
+            self.runtime.cancel_quick(run["public_id"])
+        else:
+            await self.runtime.facade.cancel_run(profile, run["hermes_run_id"])
         current = await asyncio.to_thread(
             store.update_run, run["public_id"], "cancelled"
         )
@@ -1311,6 +1398,10 @@ class MobileAPI:
         profile, _store, run = await self._mapped_run(request)
         if run["status"] != "running":
             raise MobileError("run_not_steerable", "El run ya no acepta steering.", 409)
+        if run.get("mode") == "quick":
+            raise MobileError(
+                "run_not_steerable", "El modo rápido no admite steering.", 409
+            )
         body = await self._body(request, SteerRequest)
         await self.runtime.facade.steer_run(
             profile, run["hermes_run_id"], body.instruction

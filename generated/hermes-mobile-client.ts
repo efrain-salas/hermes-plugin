@@ -18,6 +18,8 @@ export interface InboxAction { type: InboxActionType; conversation_id?: string; 
 export interface InboxItem { id: string; kind: string; severity: InboxSeverity; title: string; body: string; source: { type: string; id: string | null }; conversation_id: string | null; context: Record<string, Json>; actions: InboxAction[]; unread: boolean; resolved: boolean; occurred_at: string; read_at: string | null; resolved_at: string | null; updated_at: string; }
 export interface InboxPage { items: InboxItem[]; next_cursor: string | null; has_more: boolean; unread_count: number; }
 export interface InboxConversationInput { title?: string | null; }
+export type RunMode = "full" | "quick";
+export interface RunCreateInput { client_message_id: string; input: Array<{ type: "text"; text: string } | { type: "attachment"; attachment_id: string }>; mode?: RunMode; }
 export interface InboxReplyInput { client_message_id: string; input: Array<{ type: "text"; text: string } | { type: "attachment"; attachment_id: string }>; conversation_title?: string | null; }
 export interface RunAccepted { run_id: string; conversation_id: string; user_message_id: string | null; status: string; events_url: string; }
 export interface InboxReadAllResult { updated: number; }
@@ -88,7 +90,7 @@ export class HermesMobileClient {
   forkConversation(conversation_id: string, options: RequestOptions = {}): Promise<unknown> { return this.request("POST", this.path("/p/{profile}/v1/mobile/conversations/{conversation_id}/fork", { profile: this.profile, conversation_id: conversation_id }), options); }
   readConversation(conversation_id: string, options: RequestOptions = {}): Promise<unknown> { return this.request("POST", this.path("/p/{profile}/v1/mobile/conversations/{conversation_id}/read", { profile: this.profile, conversation_id: conversation_id }), options); }
   listMessages(conversation_id: string, options: RequestOptions = {}): Promise<unknown> { return this.request("GET", this.path("/p/{profile}/v1/mobile/conversations/{conversation_id}/messages", { profile: this.profile, conversation_id: conversation_id }), options); }
-  createRun(conversation_id: string, options: RequestOptions = {}): Promise<unknown> { return this.request("POST", this.path("/p/{profile}/v1/mobile/conversations/{conversation_id}/runs", { profile: this.profile, conversation_id: conversation_id }), options); }
+  createRun(conversation_id: string, options: RequestOptions = {}): Promise<RunAccepted> { return this.request<RunAccepted>("POST", this.path("/p/{profile}/v1/mobile/conversations/{conversation_id}/runs", { profile: this.profile, conversation_id: conversation_id }), options); }
   getRun(run_id: string, options: RequestOptions = {}): Promise<unknown> { return this.request("GET", this.path("/p/{profile}/v1/mobile/runs/{run_id}", { profile: this.profile, run_id: run_id }), options); }
   streamRunEvents(run_id: string, options: StreamOptions = {}): AsyncGenerator<RunEvent> { return this.events(this.path("/p/{profile}/v1/mobile/runs/{run_id}/events", { profile: this.profile, run_id: run_id }), options); }
   cancelRun(run_id: string, options: RequestOptions = {}): Promise<unknown> { return this.request("POST", this.path("/p/{profile}/v1/mobile/runs/{run_id}/cancel", { profile: this.profile, run_id: run_id }), options); }

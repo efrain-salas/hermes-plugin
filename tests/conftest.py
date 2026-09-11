@@ -300,8 +300,56 @@ def fake_facade():
     return FakeFacade()
 
 
+class FakeQuickAgent:
+    def __init__(self):
+        self.calls: list[dict[str, Any]] = []
+        self.fail = False
+
+    async def stream_events(
+        self,
+        *,
+        profile,
+        session_id,
+        user_message,
+        model="",
+        reasoning_effort=None,
+        timezone=None,
+        locale=None,
+        control=None,
+    ):
+        self.calls.append(
+            {
+                "profile": profile,
+                "session_id": session_id,
+                "user_message": user_message,
+                "model": model,
+                "reasoning_effort": reasoning_effort,
+                "timezone": timezone,
+                "locale": locale,
+            }
+        )
+        if self.fail:
+            yield {"event": "run.failed", "error": "quick boom"}
+            return
+        yield {"event": "message.delta", "delta": "Hola"}
+        yield {"event": "tool.started", "tool_name": "web_search"}
+        yield {
+            "event": "tool.completed",
+            "tool_name": "web_search",
+            "duration": 0.1,
+            "is_error": False,
+        }
+        yield {"event": "message.completed", "content": "Hola mundo"}
+        yield {"event": "run.completed"}
+
+
 @pytest.fixture
-async def runtime(tmp_path: Path, fake_facade: FakeFacade):
+def fake_quick_agent():
+    return FakeQuickAgent()
+
+
+@pytest.fixture
+async def runtime(tmp_path: Path, fake_facade: FakeFacade, fake_quick_agent: FakeQuickAgent):
     (tmp_path / "profiles" / "mujer").mkdir(parents=True)
     config = MobileConfig(
         default_home=tmp_path, push=PushConfig(enabled=False), pairing_ttl_seconds=600
@@ -311,6 +359,7 @@ async def runtime(tmp_path: Path, fake_facade: FakeFacade):
         facade=fake_facade,
         cron_reader=fake_facade,
         profile_preferences=fake_facade,
+        quick_agent=fake_quick_agent,
     )  # type: ignore[arg-type]
     yield value
     if value.started:

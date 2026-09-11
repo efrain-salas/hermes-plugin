@@ -51,6 +51,16 @@ config_schema:
   files:
     type: dict
     default: {enabled: true, ocr_enabled: false}
+  quick:
+    type: dict
+    default:
+      enabled: true
+      toolsets: [search]
+      max_iterations: 8
+      timeout_seconds: 180
+    description: >-
+      Lightweight turn mode: no memory, context files, MCP or review; only the
+      listed web-search toolsets. The client opts in per run with mode=quick.
 tags:
   - mobile
   - api
