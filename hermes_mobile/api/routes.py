@@ -781,31 +781,55 @@ class MobileAPI:
         profile = self._profile(request)
         store = self.runtime.store(profile)
         limit, offset = self._page_params(request)
-        native = await self.runtime.facade.list_conversations(
-            profile, limit=limit + 1, offset=offset
-        )
-        items = [
-            await self._conversation_resource(profile, row, store)
-            for row in native.get("data", [])
-        ]
         archived = request.query.get("archived")
-        if archived in {"true", "false"}:
-            wanted = archived == "true"
-            items = [item for item in items if item["archived"] is wanted]
+        wanted_archived = (
+            archived == "true" if archived in {"true", "false"} else None
+        )
         query = request.query.get("q", "").casefold().strip()
-        if query:
-            items = [
-                item
-                for item in items
-                if query in str(item.get("title") or "").casefold()
-                or query in str(item.get("preview") or "").casefold()
-            ]
-        has_more = len(items) > limit or bool(native.get("has_more"))
-        items = items[:limit]
+
+        # Hermes persists every cron execution as an internal session. Walk the
+        # native pages until we have a full mobile page, but never project those
+        # implementation sessions as user conversations.
+        items: list[dict[str, Any]] = []
+        native_offset = offset
+        next_offset: int | None = None
+        while len(items) <= limit:
+            native = await self.runtime.facade.list_conversations(
+                profile, limit=limit + 1, offset=native_offset
+            )
+            rows = native.get("data", [])
+            if not rows:
+                break
+            for index, row in enumerate(rows):
+                row_offset = native_offset + index
+                session_id = str(row.get("id") or "")
+                source = str(row.get("source") or "").casefold()
+                if source == "cron" or session_id.startswith("cron_"):
+                    continue
+                item = await self._conversation_resource(profile, row, store)
+                if (
+                    wanted_archived is not None
+                    and item["archived"] is not wanted_archived
+                ):
+                    continue
+                if query and not (
+                    query in str(item.get("title") or "").casefold()
+                    or query in str(item.get("preview") or "").casefold()
+                ):
+                    continue
+                if len(items) == limit:
+                    next_offset = row_offset
+                    break
+                items.append(item)
+            if next_offset is not None or not native.get("has_more"):
+                break
+            native_offset += len(rows)
+
+        has_more = next_offset is not None
         return self._json(
             {
                 "items": items,
-                "next_cursor": self._cursor(offset + limit) if has_more else None,
+                "next_cursor": self._cursor(next_offset) if has_more else None,
                 "has_more": has_more,
             }
         )

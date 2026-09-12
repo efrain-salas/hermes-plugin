@@ -381,6 +381,54 @@ async def test_conversation_full_lifecycle_and_idempotency(client, auth):
     ).status == 404
 
 
+async def test_conversation_listing_excludes_cron_sessions_without_breaking_pagination(
+    client, runtime, fake_facade, auth
+):
+    _, headers = auth
+    for session_id, source, title in (
+        ("cron_job-one_20260912_090000", "cron", "Scheduled one"),
+        ("api_first", "api_server", "First"),
+        ("cron_job-two_20260912_100000", None, "Scheduled two"),
+        ("api_second", "api_server", "Second"),
+        ("api_third", "api_server", "Third"),
+    ):
+        fake_facade.sessions["default"][session_id] = {
+            "id": session_id,
+            "source": source,
+            "title": title,
+            "preview": title,
+            "model": "mock-model",
+            "started_at": 1_788_948_000.0,
+            "last_active": 1_788_948_000.0,
+            "pinned": False,
+            "archived": False,
+        }
+
+    first = await client.get(
+        "/p/default/v1/mobile/conversations?limit=2", headers=headers
+    )
+    first_body = await first.json()
+    assert [item["title"] for item in first_body["items"]] == ["First", "Second"]
+    assert first_body["has_more"] is True
+    assert first_body["next_cursor"]
+
+    second = await client.get(
+        "/p/default/v1/mobile/conversations",
+        headers=headers,
+        params={"limit": "2", "cursor": first_body["next_cursor"]},
+    )
+    second_body = await second.json()
+    assert [item["title"] for item in second_body["items"]] == ["Third"]
+    assert second_body["has_more"] is False
+    assert second_body["next_cursor"] is None
+    assert runtime.store("default").conversation_by_hermes_id(
+        "cron_job-one_20260912_090000"
+    ) is None
+    assert runtime.store("default").conversation_by_hermes_id(
+        "cron_job-two_20260912_100000"
+    ) is None
+
+
 async def test_conversation_model_reasoning_and_profile_preference_scope(
     client, fake_facade, auth
 ):
