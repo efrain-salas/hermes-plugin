@@ -58,6 +58,23 @@ def test_generated_contract_is_current_and_complete():
         ["content"]["application/json"]["schema"]["$ref"]
         == "#/components/schemas/SyncResponse"
     )
+    device_update = schemas["DeviceUpdate"]
+    assert device_update["properties"]["push_provider"]["enum"] == ["apns", None]
+    assert device_update["properties"]["push_environment"]["enum"] == [
+        "sandbox",
+        "production",
+        None,
+    ]
+    assert "push_token" in device_update["properties"]
+    for operation in ("post", "patch"):
+        path = (
+            "/p/{profile}/v1/mobile/devices"
+            if operation == "post"
+            else "/p/{profile}/v1/mobile/devices/{device_id}"
+        )
+        assert document["paths"][path][operation]["requestBody"]["content"][
+            "application/json"
+        ]["schema"] == {"$ref": "#/components/schemas/DeviceUpdate"}
     assert schemas["SyncChange"]["required"] == ["type", "entity", "id"]
     assert schemas["ModelsResponse"]["required"] == [
         "items",
@@ -104,6 +121,8 @@ def test_generated_contract_is_current_and_complete():
     assert "): Promise<RunAccepted>" in generated_client
     assert 'export type RunMode = "full" | "quick";' in generated_client
     assert "mode: RunMode;" in generated_client
+    assert 'export type PushEnvironment = "sandbox" | "production";' in generated_client
+    assert "export interface DeviceUpdate {" in generated_client
 
 
 def test_every_error_response_uses_common_envelope():

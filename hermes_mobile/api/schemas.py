@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import re
 from typing import Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class StrictModel(BaseModel):
@@ -12,6 +13,10 @@ class StrictModel(BaseModel):
 ReasoningEffort: TypeAlias = Literal[
     "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
 ]
+
+PushEnvironment: TypeAlias = Literal["sandbox", "production"]
+
+_APNS_TOKEN = re.compile(r"^[0-9a-f]+$")
 
 
 class DevicePair(StrictModel):
@@ -46,8 +51,9 @@ class DeviceUpdate(StrictModel):
     installation_id: str | None = Field(default=None, min_length=8, max_length=128)
     name: str | None = Field(default=None, min_length=1, max_length=100)
     platform: Literal["ios", "android"] | None = None
-    push_provider: Literal["expo"] | None = None
+    push_provider: Literal["apns"] | None = None
     push_token: str | None = Field(default=None, max_length=512)
+    push_environment: PushEnvironment | None = None
     app_version: str | None = Field(default=None, max_length=50)
     locale: str | None = Field(default=None, max_length=35)
     timezone: str | None = Field(default=None, max_length=100)
@@ -55,12 +61,47 @@ class DeviceUpdate(StrictModel):
 
     @field_validator("push_token")
     @classmethod
-    def validate_push(cls, value: str | None) -> str | None:
-        if value is not None and not value.startswith(
-            ("ExponentPushToken[", "ExpoPushToken[")
+    def validate_push_token(cls, value: str | None) -> str | None:
+        """Normalize an opaque APNs token without assuming a fixed length."""
+        if value is None:
+            return None
+        normalized = value.strip().lower().replace(" ", "").strip("<>")
+        if (
+            not normalized
+            or len(normalized) % 2
+            or not _APNS_TOKEN.fullmatch(normalized)
         ):
-            raise ValueError("unsupported Expo push token")
-        return value
+            raise ValueError(
+                "push_token must be an even-length hexadecimal APNs token"
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_push_registration(self) -> DeviceUpdate:
+        fields = self.model_fields_set
+        provider_set = "push_provider" in fields
+        token_set = "push_token" in fields
+        environment_set = "push_environment" in fields
+        if provider_set and self.push_provider is None:
+            # Explicit null body for the removal contract.
+            if self.push_token or self.push_environment:
+                raise ValueError(
+                    "push_token and push_environment must be omitted to clear push"
+                )
+            return self
+        if self.push_provider == "apns":
+            if not self.push_token or not self.push_environment:
+                raise ValueError(
+                    "push_provider=apns requires push_token and push_environment"
+                )
+            if self.platform is not None and self.platform != "ios":
+                raise ValueError("push_provider=apns requires platform=ios")
+            return self
+        if token_set or environment_set:
+            raise ValueError(
+                "push_provider=apns is required with push_token/push_environment"
+            )
+        return self
 
 
 class ConversationCreate(StrictModel):

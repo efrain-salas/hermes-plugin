@@ -87,13 +87,79 @@ hermes mobile revoke-device dev_xxx --profile default
 en formato estructurado; `--qr` permite documentar explícitamente el formato interactivo. El secreto es
 de un solo uso y expira a los diez minutos por defecto. Trátalo como una credencial temporal.
 
-Dentro de cada perfil, un token push sólo puede pertenecer a un dispositivo activo. Si iOS vuelve a
+Dentro de cada perfil, un token APNs sólo puede pertenecer a un dispositivo activo. Si iOS vuelve a
 registrar el mismo token con otro `installation_id`, la recepción push se transfiere al registro más
-reciente para evitar notificaciones duplicadas. Al arrancar también se normalizan registros antiguos.
+reciente para evitar notificaciones duplicadas. Al arrancar también se normalizan registros antiguos. Los
+registros Expo heredados se desactivan en la migración: nunca se envían a APNs ni cuentan como
+`push_registered`.
 
 Cuando `public_base_url` está configurada, la URI incluye también el host y la app puede completar el
 emparejamiento escaneando el QR sin pedir al usuario que copie una dirección. Los clientes antiguos
 pueden ignorar ese parámetro adicional.
+
+## Notificaciones push (APNs)
+
+Las notificaciones se entregan directamente por Apple Push Notification service con autenticación por
+token (JWT ES256) y HTTP/2. La app nativa registra su token hexadecimal en `POST /devices`:
+
+```json
+{
+  "push_provider": "apns",
+  "push_token": "3f0a…c1",
+  "push_environment": "sandbox",
+  "notifications": {"turn_completed": true}
+}
+```
+
+`push_token` es opaco y de longitud variable; el servidor lo normaliza a minúsculas y sólo exige que sea
+hexadecimal con longitud par. `push_environment` debe ser `sandbox` o `production` y tiene que coincidir
+con el entorno real de la compilación iOS (`aps-environment`). El servidor elige el host APNs a partir de
+ese valor del token registrado, nunca del entorno del servidor. La respuesta devuelve
+`push_registered: true` únicamente después de cifrar y guardar el token.
+
+Para retirar el registro, envía `{"push_provider": null}` en `POST /devices` (o en `PATCH /devices/{id}`).
+El contrato de baja está definido y documentado, pero el cliente iOS todavía no lo invoca.
+
+### Configuración
+
+```yaml
+plugins:
+  entries:
+    hermes-mobile:
+      settings:
+        push:
+          enabled: true
+          provider: apns
+          topic: app.hermes.mobile
+          team_id: ABCDE12345
+          key_id: 67890FGHIJ
+          key_path: /opt/data/keys/AuthKey_67890FGHIJ.p8
+          environments: [sandbox, production]
+          timeout_seconds: 10
+          max_attempts: 8
+```
+
+La clave `.p8` se carga desde `key_path` o desde la variable de entorno `HERMES_APNS_PRIVATE_KEY`
+(nunca desde el repositorio). También se aceptan `HERMES_APNS_TEAM_ID`, `HERMES_APNS_KEY_ID`,
+`HERMES_APNS_TOPIC` y `HERMES_APNS_ENVIRONMENTS`. Si APNs está habilitado sin credenciales válidas, el
+worker registra un diagnóstico claro y deja el push deshabilitado; `hermes mobile doctor` marca el estado
+como degradado. La clave privada nunca se incluye en respuestas API, logs ni mensajes de error.
+
+### Operación y rotación
+
+- El JWT del proveedor se reutiliza durante una ventana válida y se renueva antes de una hora.
+- `200` de APNs marca la entrega como aceptada; no hay consulta posterior de tickets. `429`, `5xx` y
+  errores de red se reintentan con espera exponencial. Los motivos `4xx` se clasifican según Apple.
+- `410 Unregistered` invalida únicamente el token concreto que produjo el rechazo. Si el dispositivo ya
+  registró un token nuevo, el antiguo no lo sobreescribe.
+- Para rotar la clave: crea una clave nueva en Apple Developer, escribe el `.p8` en una ruta protegida
+  (`0600`, propiedad de `hermes`), actualiza `key_id`/`key_path` y reinicia el Gateway. La clave anterior
+  puede revocarse en Apple tras confirmar entregas correctas.
+- Las preferencias por tipo de evento siguen vigentes y la deduplicación del outbox se conserva.
+
+La recepción real en un iPhone físico todavía no se ha validado: requiere una clave APNs válida y un
+perfil de firma con `aps-environment` coherente con `AprilAPNSEnvironment`. La cobertura automatizada usa
+un servidor APNs simulado (HTTP/1.1 local); en producción el cliente usa HTTP/2 con TLS.
 
 ## Modelos y razonamiento
 
@@ -283,11 +349,11 @@ docker compose -f docker-compose.test.yml up --build --abort-on-container-exit -
 ```
 
 La segunda orden levanta un Hermes real con perfiles `default` y `mujer`, un proveedor LLM compatible
-simulado y Expo Push simulado. Comprueba además el portal raíz y una ceremonia WebAuthn real hasta la
+simulado y APNs simulado. Comprueba además el portal raíz y una ceremonia WebAuthn real hasta la
 entrega de opciones de registro. Ejecuta pairing, aislamiento cruzado, conversaciones, run real, SSE,
 adjuntos, sync, push, CLI, modo rápido y fallos de dependencias. El contenedor `tests` falla si el Gateway
 deja de estar vivo durante las pruebas de resiliencia.
 
-El contrato está en `openapi/hermes-mobile-v1.yaml`; el cliente Expo generado vive en
+El contrato está en `openapi/hermes-mobile-v1.yaml`; el cliente TypeScript generado vive en
 `generated/hermes-mobile-client.ts`. CI comprueba que el generador no deja cambios y que TypeScript
 compila.

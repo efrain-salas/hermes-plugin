@@ -12,11 +12,11 @@ services:
       timeout: 2s
       retries: 20
 
-  fake-expo:
+  fake-apns:
     <<: *test-image
-    entrypoint: ["/opt/hermes/.venv/bin/python", "/opt/test/fake_services.py", "expo"]
+    entrypoint: ["/opt/hermes/.venv/bin/python", "/opt/test/fake_services.py", "apns"]
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8082/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8083/health"]
       interval: 2s
       timeout: 2s
       retries: 20
@@ -38,7 +38,7 @@ services:
     depends_on:
       fake-llm:
         condition: service_healthy
-      fake-expo:
+      fake-apns:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8642/p/default/v1/mobile/health"]
@@ -54,7 +54,7 @@ services:
     environment:
       HERMES_MOBILE_TEST_URL: http://hermes:8642
       HERMES_MOBILE_TEST_DATA: /hermes-data
-      HERMES_MOBILE_EXPO_URL: http://fake-expo:8082
+      HERMES_MOBILE_APNS_URL: http://fake-apns:8083
     volumes:
       - .:/workspace:ro
       - hermes-test-data:/hermes-data

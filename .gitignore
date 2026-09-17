@@ -7,3 +7,8 @@ node_modules/
 **/__pycache__/
 **/*.py[cod]
 *.egg-info/
+
+# APNs / Apple secrets
+*.p8
+*.p12
+AuthKey_*.p8

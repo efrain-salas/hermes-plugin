@@ -119,9 +119,25 @@ class ControlStore(SQLiteStore):
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(devices)")}
         if "push_token_hash" not in columns:
             conn.execute("ALTER TABLE devices ADD COLUMN push_token_hash TEXT")
+        if "push_environment" not in columns:
+            conn.execute("ALTER TABLE devices ADD COLUMN push_environment TEXT")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_user_push_token "
             "ON devices(user_id,push_token_hash) WHERE push_token_hash IS NOT NULL"
+        )
+        # Legacy Expo registrations and their in-flight deliveries can never be
+        # satisfied by APNs: deactivate them without touching devices or prefs.
+        conn.execute(
+            "UPDATE devices SET push_provider=NULL,push_token_encrypted=NULL,"
+            "push_token_hash=NULL,push_environment=NULL "
+            "WHERE push_provider IS NOT NULL AND push_provider<>'apns'"
+        )
+        conn.execute(
+            "UPDATE notification_outbox SET status='expired',"
+            "last_error_code=COALESCE(last_error_code,'legacy_expo') "
+            "WHERE status IN ('pending','receipt_pending') AND device_id IN "
+            "(SELECT id FROM devices WHERE push_provider IS NULL "
+            "OR push_provider<>'apns' OR push_environment IS NULL)"
         )
 
     def create_pairing(
@@ -602,7 +618,8 @@ class ControlStore(SQLiteStore):
 
         def _revoke(conn: sqlite3.Connection) -> bool:
             changed = conn.execute(
-                "UPDATE devices SET revoked_at=?,push_token_encrypted=NULL,push_token_hash=NULL,updated_at=? "
+                "UPDATE devices SET revoked_at=?,push_token_encrypted=NULL,push_token_hash=NULL,"
+                "push_environment=NULL,updated_at=? "
                 "WHERE id=? AND revoked_at IS NULL",
                 (now, now, device_id),
             ).rowcount
@@ -644,6 +661,7 @@ class ControlStore(SQLiteStore):
             "push_provider",
             "push_token_encrypted",
             "push_token_hash",
+            "push_environment",
             "notification_preferences_json",
         }
         clean = {key: value for key, value in fields.items() if key in allowed}
@@ -660,7 +678,8 @@ class ControlStore(SQLiteStore):
                 push_token_hash = clean.get("push_token_hash")
                 if push_token_hash:
                     conn.execute(
-                        "UPDATE devices SET push_token_encrypted=NULL,push_token_hash=NULL,updated_at=? "
+                        "UPDATE devices SET push_token_encrypted=NULL,push_token_hash=NULL,"
+                        "push_environment=NULL,updated_at=? "
                         "WHERE user_id=? AND id<>? AND push_token_hash=?",
                         (
                             clean["updated_at"],
@@ -694,7 +713,8 @@ class ControlStore(SQLiteStore):
                 dict(row)
                 for row in conn.execute(
                     "SELECT id,user_id,push_token_encrypted,last_seen_at,updated_at,created_at "
-                    "FROM devices WHERE revoked_at IS NULL AND push_token_encrypted IS NOT NULL"
+                    "FROM devices WHERE revoked_at IS NULL AND push_token_encrypted IS NOT NULL "
+                    "AND push_provider='apns' AND push_environment IS NOT NULL"
                 )
             ]
 
@@ -727,8 +747,8 @@ class ControlStore(SQLiteStore):
                 winner, *duplicates = registrations
                 for duplicate in duplicates:
                     removed += conn.execute(
-                        "UPDATE devices SET push_token_encrypted=NULL,push_token_hash=NULL,updated_at=? "
-                        "WHERE id=?",
+                        "UPDATE devices SET push_token_encrypted=NULL,push_token_hash=NULL,"
+                        "push_environment=NULL,updated_at=? WHERE id=?",
                         (now, duplicate["id"]),
                     ).rowcount
                 conn.execute(
@@ -739,6 +759,33 @@ class ControlStore(SQLiteStore):
 
         return self.transaction(_normalize)
 
+    def resolve_legacy_outbox(self) -> int:
+        """Expire in-flight deliveries that can no longer be sent by APNs."""
+        with self.connect() as conn:
+            return conn.execute(
+                "UPDATE notification_outbox SET status='expired',"
+                "last_error_code=COALESCE(last_error_code,'legacy_provider') "
+                "WHERE status IN ('pending','receipt_pending') AND device_id IN "
+                "(SELECT id FROM devices WHERE push_provider IS NULL "
+                "OR push_provider<>'apns' OR push_environment IS NULL)"
+            ).rowcount
+
+    def clear_push_token(self, device_id: str, token_hash: str) -> bool:
+        """Clear a registration only if it still holds the rejected token."""
+        now = iso()
+
+        def _clear(conn: sqlite3.Connection) -> bool:
+            return bool(
+                conn.execute(
+                    "UPDATE devices SET push_token_encrypted=NULL,push_token_hash=NULL,"
+                    "push_environment=NULL,updated_at=? "
+                    "WHERE id=? AND push_token_hash=?",
+                    (now, device_id, token_hash),
+                ).rowcount
+            )
+
+        return self.transaction(_clear)
+
     def enqueue_push(
         self, profile: str, kind: str, dedupe_key: str, payload: dict[str, Any]
     ) -> int:
@@ -746,7 +793,9 @@ class ControlStore(SQLiteStore):
         with self.connect() as conn:
             devices = conn.execute(
                 "SELECT d.id,d.notification_preferences_json FROM devices d JOIN users u ON u.id=d.user_id "
-                "WHERE u.profile_id=? AND d.revoked_at IS NULL AND d.push_token_encrypted IS NOT NULL",
+                "WHERE u.profile_id=? AND d.revoked_at IS NULL "
+                "AND d.push_token_encrypted IS NOT NULL AND d.push_provider='apns' "
+                "AND d.push_environment IS NOT NULL",
                 (profile,),
             ).fetchall()
             count = 0
@@ -797,18 +846,11 @@ class ControlStore(SQLiteStore):
     def pending_push(self, limit: int = 20) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute(
-                "SELECT o.*,d.push_token_encrypted FROM notification_outbox o JOIN devices d ON d.id=o.device_id "
+                "SELECT o.*,d.push_token_encrypted,d.push_provider,d.push_environment "
+                "FROM notification_outbox o JOIN devices d ON d.id=o.device_id "
                 "WHERE o.status='pending' AND o.next_attempt_at<=? AND d.revoked_at IS NULL "
+                "AND d.push_provider='apns' AND d.push_environment IS NOT NULL "
                 "ORDER BY o.created_at LIMIT ?",
-                (iso(), limit),
-            ).fetchall()
-            return [dict(row) for row in rows]
-
-    def pending_receipts(self, limit: int = 20) -> list[dict[str, Any]]:
-        with self.connect() as conn:
-            rows = conn.execute(
-                "SELECT o.*,d.push_token_encrypted FROM notification_outbox o JOIN devices d ON d.id=o.device_id "
-                "WHERE o.status='receipt_pending' AND o.next_attempt_at<=? ORDER BY o.created_at LIMIT ?",
                 (iso(), limit),
             ).fetchall()
             return [dict(row) for row in rows]
@@ -817,55 +859,30 @@ class ControlStore(SQLiteStore):
         self,
         outbox_id: str,
         *,
-        ticket: str | None = None,
+        accepted: bool = False,
+        apns_id: str | None = None,
         error: str | None = None,
         retry_at: datetime | None = None,
     ) -> None:
         with self.connect() as conn:
-            if error and retry_at:
+            if retry_at is not None:
                 conn.execute(
-                    "UPDATE notification_outbox SET attempts=attempts+1,last_error_code=?,next_attempt_at=? WHERE id=?",
-                    (error, iso(retry_at), outbox_id),
+                    "UPDATE notification_outbox SET attempts=attempts+1,status='pending',"
+                    "provider_ticket_id=?,last_error_code=?,next_attempt_at=? WHERE id=?",
+                    (apns_id, error, iso(retry_at), outbox_id),
                 )
-            else:
-                status = (
-                    "failed" if error else "receipt_pending" if ticket else "delivered"
-                )
+            elif accepted:
                 conn.execute(
-                    "UPDATE notification_outbox SET attempts=attempts+1,status=?,provider_ticket_id=?,"
-                    "last_error_code=?,next_attempt_at=?,delivered_at=? WHERE id=?",
-                    (
-                        status,
-                        ticket,
-                        error,
-                        iso(utcnow() + timedelta(seconds=1)) if ticket else iso(),
-                        iso() if status == "delivered" else None,
-                        outbox_id,
-                    ),
-                )
-
-    def finish_receipt(
-        self,
-        outbox_id: str,
-        *,
-        error: str | None = None,
-        retry_at: datetime | None = None,
-    ) -> None:
-        with self.connect() as conn:
-            if retry_at:
-                conn.execute(
-                    "UPDATE notification_outbox SET last_error_code=?,next_attempt_at=? WHERE id=?",
-                    (error, iso(retry_at), outbox_id),
+                    "UPDATE notification_outbox SET attempts=attempts+1,status='delivered',"
+                    "provider_ticket_id=?,last_error_code=NULL,next_attempt_at=?,delivered_at=? "
+                    "WHERE id=?",
+                    (apns_id, iso(), iso(), outbox_id),
                 )
             else:
                 conn.execute(
-                    "UPDATE notification_outbox SET status=?,last_error_code=?,delivered_at=? WHERE id=?",
-                    (
-                        "failed" if error else "delivered",
-                        error,
-                        None if error else iso(),
-                        outbox_id,
-                    ),
+                    "UPDATE notification_outbox SET attempts=attempts+1,status='failed',"
+                    "provider_ticket_id=?,last_error_code=?,next_attempt_at=? WHERE id=?",
+                    (apns_id, error, iso(), outbox_id),
                 )
 
 

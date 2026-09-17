@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+APNS_ENVIRONMENTS = ("sandbox", "production")
 
 
 def _bounded_int(value: Any, default: int, low: int, high: int) -> int:
@@ -14,12 +17,149 @@ def _bounded_int(value: Any, default: int, low: int, high: int) -> int:
     return min(high, max(low, parsed))
 
 
+class PushConfigError(RuntimeError):
+    """Raised when push is enabled with an unusable APNs configuration."""
+
+
+@dataclass(frozen=True)
+class APNsCredentials:
+    """Resolved, non-loggable APNs token-auth material."""
+
+    team_id: str
+    key_id: str
+    topic: str
+    private_key_pem: str = field(repr=False)
+    environments: tuple[str, ...] = APNS_ENVIRONMENTS
+
+
 @dataclass(frozen=True)
 class PushConfig:
-    enabled: bool = True
-    endpoint: str = "https://exp.host/--/api/v2/push/send"
+    enabled: bool = False
+    provider: str = "apns"
+    topic: str = "app.hermes.mobile"
+    team_id: str = ""
+    key_id: str = ""
+    private_key: str = field(default="", repr=False)
+    key_path: str = ""
+    environments: tuple[str, ...] = APNS_ENVIRONMENTS
     timeout_seconds: int = 10
     max_attempts: int = 8
+    jwt_ttl_seconds: int = 3300
+    max_payload_bytes: int = 4096
+    endpoint_override: str = ""
+    retry_base_seconds: int = 2
+    http2: bool = True
+
+    def configuration_error(self) -> str | None:
+        """Return a clear diagnostic, or ``None`` when APNs is usable."""
+        if not self.enabled:
+            return None
+        if self.provider != "apns":
+            return f"push provider '{self.provider}' is no longer supported; use 'apns'"
+        missing = [
+            name for name in ("team_id", "key_id", "topic") if not getattr(self, name)
+        ]
+        if not self.private_key and not self.key_path:
+            missing.append("private_key")
+        elif self.key_path and not Path(self.key_path).is_file():
+            return f"APNs key file not found: {Path(self.key_path).name}"
+        if missing:
+            return "missing APNs configuration: " + ", ".join(missing)
+        if not self.environments:
+            return "no APNs environment is enabled"
+        return None
+
+    def credentials(self) -> APNsCredentials:
+        """Load and validate the private key, never exposing it in messages."""
+        error = self.configuration_error()
+        if error:
+            raise PushConfigError(error)
+        pem = self.private_key
+        if not pem and self.key_path:
+            try:
+                pem = Path(self.key_path).read_text(encoding="utf-8")
+            except OSError as exc:
+                raise PushConfigError(
+                    f"could not read APNs key file: {exc.strerror or 'io_error'}"
+                ) from exc
+        try:
+            from cryptography.hazmat.primitives.asymmetric import ec
+            from cryptography.hazmat.primitives.serialization import (
+                load_pem_private_key,
+            )
+
+            parsed = load_pem_private_key(pem.encode("utf-8"), password=None)
+            if not isinstance(parsed, ec.EllipticCurvePrivateKey):
+                raise PushConfigError("APNs private key must be an EC P-256 key")
+        except PushConfigError:
+            raise
+        except Exception as exc:
+            raise PushConfigError(
+                "APNs private key is not a valid .p8 PEM file"
+            ) from exc
+        return APNsCredentials(
+            team_id=self.team_id,
+            key_id=self.key_id,
+            topic=self.topic,
+            private_key_pem=pem,
+            environments=self.environments,
+        )
+
+    def validate(self) -> None:
+        self.credentials()
+
+
+def _normalize_environments(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return APNS_ENVIRONMENTS
+    normalized = []
+    for item in value:
+        name = str(item).strip().lower()
+        if name in APNS_ENVIRONMENTS and name not in normalized:
+            normalized.append(name)
+    return tuple(normalized)
+
+
+def _push_config(push: Mapping[str, Any]) -> PushConfig:
+    def _value(key: str, env: str) -> str:
+        raw = push.get(key)
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return os.environ.get(env, "").strip()
+        return str(raw).strip()
+
+    enabled = push.get("enabled", False)
+    if isinstance(enabled, str):
+        enabled = enabled.strip().lower() not in {"false", "0", "no", ""}
+    return PushConfig(
+        enabled=bool(enabled),
+        provider=_value("provider", "HERMES_APNS_PROVIDER") or "apns",
+        topic=_value("topic", "HERMES_APNS_TOPIC") or "app.hermes.mobile",
+        team_id=_value("team_id", "HERMES_APNS_TEAM_ID"),
+        key_id=_value("key_id", "HERMES_APNS_KEY_ID"),
+        private_key=_value("private_key", "HERMES_APNS_PRIVATE_KEY"),
+        key_path=_value("key_path", "HERMES_APNS_KEY_PATH"),
+        environments=_normalize_environments(
+            push.get("environments", os.environ.get("HERMES_APNS_ENVIRONMENTS"))
+        ),
+        timeout_seconds=_bounded_int(push.get("timeout_seconds", 10), 10, 1, 30),
+        max_attempts=_bounded_int(push.get("max_attempts", 8), 8, 1, 20),
+        jwt_ttl_seconds=_bounded_int(
+            push.get("jwt_ttl_seconds", 3300), 3300, 60, 3600
+        ),
+        max_payload_bytes=_bounded_int(
+            push.get("max_payload_bytes", 4096), 4096, 512, 4096
+        ),
+        endpoint_override=str(push.get("endpoint_override") or "").strip(),
+        retry_base_seconds=_bounded_int(
+            push.get("retry_base_seconds", 2), 2, 1, 60
+        ),
+        http2=bool(push.get("http2", True)),
+    )
+
+
+
 
 
 @dataclass(frozen=True)
@@ -105,16 +245,7 @@ class MobileConfig:
             terminal_event_retention_days=_bounded_int(
                 ctx.get_config("terminal_event_retention_days", 7), 7, 1, 30
             ),
-            push=PushConfig(
-                enabled=bool(push.get("enabled", True)),
-                endpoint=str(
-                    push.get("endpoint") or "https://exp.host/--/api/v2/push/send"
-                ),
-                timeout_seconds=_bounded_int(
-                    push.get("timeout_seconds", 10), 10, 1, 30
-                ),
-                max_attempts=_bounded_int(push.get("max_attempts", 8), 8, 1, 20),
-            ),
+            push=_push_config(push),
             files_enabled=bool(files.get("enabled", True)),
             ocr_enabled=bool(files.get("ocr_enabled", False)),
             quick_enabled=bool(quick.get("enabled", True)),

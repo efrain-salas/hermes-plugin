@@ -83,6 +83,8 @@ def test_outbox_is_deduplicated_and_respects_preferences(tmp_path):
     store.update_device(
         paired["device"]["id"],
         {
+            "push_provider": "apns",
+            "push_environment": "sandbox",
             "push_token_encrypted": "encrypted",
             "notification_preferences_json": json.dumps({"turn_completed": True}),
         },
@@ -111,7 +113,11 @@ def test_legacy_duplicate_push_tokens_are_normalized(tmp_path):
         )
         store.update_device(
             paired["device"]["id"],
-            {"push_token_encrypted": box.encrypt("ExponentPushToken[same]")},
+            {
+                "push_provider": "apns",
+                "push_environment": "sandbox",
+                "push_token_encrypted": box.encrypt("aa" * 32),
+            },
         )
 
     assert store.normalize_push_registrations(box.decrypt) == 1
@@ -162,7 +168,50 @@ def test_control_store_migrates_push_token_hash(tmp_path):
             row["name"] for row in conn.execute("PRAGMA index_list(devices)")
         }
     assert "push_token_hash" in columns
+    assert "push_environment" in columns
     assert "idx_devices_user_push_token" in indexes
+
+
+def test_control_store_migration_disables_legacy_expo_devices(tmp_path):
+    db_path = tmp_path / "control.db"
+    store = ControlStore(db_path)
+    store.initialize()
+    pair = store.create_pairing("default", "Alice", 600)
+    paired = store.consume_pairing(
+        "default",
+        pair["token"],
+        {"installation_id": "legacy-install", "name": "Phone", "platform": "ios"},
+        ("devices:self",),
+    )
+    box = SecretBox(tmp_path / "data.key")
+    device_id = paired["device"]["id"]
+    store.update_device(
+        device_id,
+        {
+            "push_provider": "expo",
+            "push_token_encrypted": box.encrypt("ExponentPushToken[legacy]"),
+        },
+    )
+    with store.connect() as conn:
+        conn.execute(
+            "INSERT INTO notification_outbox(id,profile_id,device_id,kind,dedupe_key,"
+            "payload_json,status,next_attempt_at,created_at) "
+            "VALUES ('out_legacy','default',?,'run.completed','legacy-run','{}',"
+            "'pending','2000-01-01T00:00:00.000Z','2000-01-01T00:00:00.000Z')",
+            (device_id,),
+        )
+
+    migrated = ControlStore(db_path)
+    migrated.initialize()
+    device = migrated.get_device(device_id)
+    assert device["push_provider"] is None
+    assert device["push_token_encrypted"] is None
+    assert migrated.pending_push() == []
+    with migrated.connect() as conn:
+        row = conn.execute(
+            "SELECT status FROM notification_outbox WHERE dedupe_key='legacy-run'"
+        ).fetchone()
+    assert row["status"] == "expired"
 
 
 def test_profile_store_migrates_and_persists_conversation_reasoning(tmp_path):

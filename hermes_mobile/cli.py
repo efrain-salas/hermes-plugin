@@ -310,6 +310,27 @@ def doctor(profile: str) -> int:
         push_attempts_valid = 1 <= int(push.get("max_attempts", 8)) <= 20
     except (TypeError, ValueError):
         push_attempts_valid = False
+    push_enabled = bool(push.get("enabled", False))
+
+    def _push_value(key: str, env: str) -> str:
+        value = push.get(key)
+        if value not in (None, ""):
+            return str(value)
+        return os.environ.get(env, "")
+
+    push_provider = _push_value("provider", "HERMES_APNS_PROVIDER") or "apns"
+    push_ready = (
+        push_provider == "apns"
+        and bool(_push_value("team_id", "HERMES_APNS_TEAM_ID"))
+        and bool(_push_value("key_id", "HERMES_APNS_KEY_ID"))
+        and bool(
+            _push_value("topic", "HERMES_APNS_TOPIC") or "app.hermes.mobile"
+        )
+        and bool(
+            _push_value("private_key", "HERMES_APNS_PRIVATE_KEY")
+            or _push_value("key_path", "HERMES_APNS_KEY_PATH")
+        )
+    )
     checks = {
         "profile_exists": home.is_dir(),
         "plugin_enabled": "hermes-mobile"
@@ -324,14 +345,7 @@ def doctor(profile: str) -> int:
         and parsed_loopback.scheme in {"http", "https"}
         and bool(parsed_loopback.hostname),
         "workers": data_dir.is_dir() and os.access(data_dir, os.W_OK),
-        "push": not bool(push.get("enabled", True))
-        or (
-            urlparse(
-                str(push.get("endpoint") or "https://exp.host/--/api/v2/push/send")
-            ).scheme
-            in {"http", "https"}
-            and push_attempts_valid
-        ),
+        "push": not push_enabled or (push_ready and push_attempts_valid),
     }
     print(
         json.dumps(

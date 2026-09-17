@@ -35,8 +35,29 @@ printf 'n\n' | "$HERMES" -p mujer plugins enable hermes-mobile
 "$HERMES" config set gateway.multiplex_profile_allowlist '["mujer"]'
 "$HERMES" config set plugins.entries.hermes-mobile.settings.public_base_url https://hermes.test
 "$HERMES" config set plugins.entries.hermes-mobile.settings.loopback_base_url http://127.0.0.1:8642
+
+# APNs test credentials: a throwaway EC P-256 key generated in-container. The
+# endpoint override keeps traffic on the fake APNs service.
+mkdir -p /opt/data/keys
+/opt/hermes/.venv/bin/python - <<'PY' > /opt/data/keys/apns-test.p8
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+key = ec.generate_private_key(ec.SECP256R1())
+print(key.private_bytes(
+    serialization.Encoding.PEM,
+    serialization.PrivateFormat.PKCS8,
+    serialization.NoEncryption(),
+).decode(), end="")
+PY
+chmod 600 /opt/data/keys/apns-test.p8
 "$HERMES" config set plugins.entries.hermes-mobile.settings.push.enabled true
-"$HERMES" config set plugins.entries.hermes-mobile.settings.push.endpoint http://fake-expo:8082/--/api/v2/push/send
+"$HERMES" config set plugins.entries.hermes-mobile.settings.push.provider apns
+"$HERMES" config set plugins.entries.hermes-mobile.settings.push.team_id TESTTEAM123
+"$HERMES" config set plugins.entries.hermes-mobile.settings.push.key_id TESTKEY1234
+"$HERMES" config set plugins.entries.hermes-mobile.settings.push.topic app.hermes.mobile
+"$HERMES" config set plugins.entries.hermes-mobile.settings.push.key_path /opt/data/keys/apns-test.p8
+"$HERMES" config set plugins.entries.hermes-mobile.settings.push.endpoint_override 'http://fake-apns:8083/3/device/{token}'
+"$HERMES" config set plugins.entries.hermes-mobile.settings.push.http2 false
 "$HERMES" config set plugins.entries.hermes-mobile.settings.push.timeout_seconds 1
 "$HERMES" config set plugins.entries.hermes-mobile.settings.push.max_attempts 3
 

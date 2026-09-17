@@ -226,6 +226,10 @@ def openapi() -> dict:
                     }
                 },
             }
+        if operation in {"upsertDevice", "patchDevice"}:
+            item["requestBody"]["content"]["application/json"]["schema"] = {
+                "$ref": "#/components/schemas/DeviceUpdate"
+            }
         if operation == "createInboxConversation":
             item["requestBody"]["content"]["application/json"]["schema"] = {
                 "$ref": "#/components/schemas/InboxConversationInput"
@@ -498,6 +502,69 @@ def openapi() -> dict:
                     "additionalProperties": False,
                     "properties": {
                         "quick_model": {"type": ["string", "null"], "maxLength": 200}
+                    },
+                },
+                "NotificationPreferences": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "turn_completed": {"type": "boolean"},
+                        "turn_failed": {"type": "boolean"},
+                        "approval_required": {"type": "boolean"},
+                        "scheduled_task_completed": {"type": "boolean"},
+                        "scheduled_task_failed": {"type": "boolean"},
+                        "system_lifecycle": {"type": "boolean"},
+                        "system_critical": {"type": "boolean"},
+                    },
+                },
+                "DeviceUpdate": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "description": (
+                        "Device metadata and APNs registration. Send push_provider, "
+                        "push_token and push_environment together to register; send "
+                        "push_provider: null to retire the registration."
+                    ),
+                    "properties": {
+                        "installation_id": {
+                            "type": ["string", "null"],
+                            "minLength": 8,
+                            "maxLength": 128,
+                        },
+                        "name": {
+                            "type": ["string", "null"],
+                            "minLength": 1,
+                            "maxLength": 100,
+                        },
+                        "platform": {
+                            "type": ["string", "null"],
+                            "enum": ["ios", "android", None],
+                        },
+                        "push_provider": {
+                            "type": ["string", "null"],
+                            "enum": ["apns", None],
+                        },
+                        "push_token": {
+                            "type": ["string", "null"],
+                            "maxLength": 512,
+                            "description": (
+                                "Opaque lowercase hexadecimal APNs device token. "
+                                "No fixed length is assumed."
+                            ),
+                        },
+                        "push_environment": {
+                            "type": ["string", "null"],
+                            "enum": ["sandbox", "production", None],
+                        },
+                        "app_version": {"type": ["string", "null"], "maxLength": 50},
+                        "locale": {"type": ["string", "null"], "maxLength": 35},
+                        "timezone": {"type": ["string", "null"], "maxLength": 100},
+                        "notifications": {
+                            "anyOf": [
+                                {"$ref": "#/components/schemas/NotificationPreferences"},
+                                {"type": "null"},
+                            ]
+                        },
                     },
                 },
                 "SyncChange": {
@@ -788,6 +855,9 @@ export interface ModelInfo { id: string; name: string; reasoning: ModelReasoning
 export interface ModelsResponse { items: ModelInfo[]; default: string | null; quick_model: string | null; default_reasoning_effort: ReasoningEffort | null; }
 export interface ProfilePreferencesInput { quick_model?: string | null; }
 export interface ProfilePreferencesResponse { quick_model: string | null; }
+export type PushEnvironment = "sandbox" | "production";
+export interface NotificationPreferences { turn_completed?: boolean; turn_failed?: boolean; approval_required?: boolean; scheduled_task_completed?: boolean; scheduled_task_failed?: boolean; system_lifecycle?: boolean; system_critical?: boolean; }
+export interface DeviceUpdate { installation_id?: string; name?: string; platform?: "ios" | "android"; push_provider?: "apns" | null; push_token?: string; push_environment?: PushEnvironment; app_version?: string; locale?: string; timezone?: string; notifications?: NotificationPreferences; }
 export interface SyncChange { type: string; entity: Record<string, Json>; id: string; }
 export interface SyncResponse { changes: SyncChange[]; next_cursor: string; has_more: boolean; server_time: string; }
 export interface ConversationCreateInput { title?: string | null; model?: string | null; reasoning_effort?: ReasoningEffort | null; }

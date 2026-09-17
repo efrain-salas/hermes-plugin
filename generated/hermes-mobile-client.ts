@@ -10,6 +10,9 @@ export interface ModelInfo { id: string; name: string; reasoning: ModelReasoning
 export interface ModelsResponse { items: ModelInfo[]; default: string | null; quick_model: string | null; default_reasoning_effort: ReasoningEffort | null; }
 export interface ProfilePreferencesInput { quick_model?: string | null; }
 export interface ProfilePreferencesResponse { quick_model: string | null; }
+export type PushEnvironment = "sandbox" | "production";
+export interface NotificationPreferences { turn_completed?: boolean; turn_failed?: boolean; approval_required?: boolean; scheduled_task_completed?: boolean; scheduled_task_failed?: boolean; system_lifecycle?: boolean; system_critical?: boolean; }
+export interface DeviceUpdate { installation_id?: string; name?: string; platform?: "ios" | "android"; push_provider?: "apns" | null; push_token?: string; push_environment?: PushEnvironment; app_version?: string; locale?: string; timezone?: string; notifications?: NotificationPreferences; }
 export interface SyncChange { type: string; entity: Record<string, Json>; id: string; }
 export interface SyncResponse { changes: SyncChange[]; next_cursor: string; has_more: boolean; server_time: string; }
 export interface ConversationCreateInput { title?: string | null; model?: string | null; reasoning_effort?: ReasoningEffort | null; }

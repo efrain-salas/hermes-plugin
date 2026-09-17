@@ -2,105 +2,138 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import random
 from datetime import timedelta
 
-import aiohttp
-
-from ..config import PushConfig
-from ..persistence.repositories import ControlStore, utcnow
+from ..config import PushConfig, PushConfigError
+from ..persistence.repositories import ControlStore, secret_hash, utcnow
 from ..security.tokens import SecretBox
-from .expo import ExpoPermanentError, check_expo_receipt, send_expo
+from .apns import (
+    APNsPermanentError,
+    APNsTemporaryError,
+    APNsTokenProvider,
+    APNsUnregisteredError,
+    build_payload,
+    create_apns_client,
+    send_apns,
+)
+
+logger = logging.getLogger("hermes_mobile")
 
 
 class PushWorker:
+    """Drain the notification outbox through APNs only.
+
+    Expo receipts no longer exist: a ``200`` from APNs marks the row as
+    accepted and nothing else is polled afterwards.
+    """
+
     def __init__(self, store: ControlStore, box: SecretBox, config: PushConfig):
         self.store = store
         self.box = box
         self.config = config
-        self.session: aiohttp.ClientSession | None = None
+        self.client = None
+        self.credentials = None
+        self.tokens: APNsTokenProvider | None = None
 
     async def close(self) -> None:
-        if self.session and not self.session.closed:
-            await self.session.close()
+        if self.client is not None:
+            await self.client.aclose()
+            self.client = None
 
     async def run(self) -> None:
         if not self.config.enabled:
             return
-        self.session = aiohttp.ClientSession()
+        try:
+            credentials = self.config.credentials()
+        except PushConfigError as exc:
+            logger.error("APNs push disabled: %s", exc)
+            return
+        self.credentials = credentials
+        self.tokens = APNsTokenProvider(credentials, self.config.jwt_ttl_seconds)
+        self.client = create_apns_client(
+            self.config.timeout_seconds, http2=self.config.http2
+        )
         try:
             while True:
                 rows = await asyncio.to_thread(self.store.pending_push, 20)
-                receipts = await asyncio.to_thread(self.store.pending_receipts, 20)
-                if not rows and not receipts:
+                if not rows:
                     await asyncio.sleep(1)
                     continue
                 for row in rows:
                     await self._send(row)
-                for row in receipts:
-                    await self._receipt(row)
         finally:
             await self.close()
 
     async def _send(self, row: dict) -> None:
         attempts = int(row["attempts"])
+        environment = row.get("push_environment")
+        if row.get("push_provider") != "apns" or not environment:
+            await asyncio.to_thread(
+                self.store.finish_push, row["id"], error="legacy_provider"
+            )
+            return
         try:
             token = self.box.decrypt(row["push_token_encrypted"])
-            payload = json.loads(row["payload_json"])
-            assert self.session is not None
-            ticket = await send_expo(
-                self.session,
-                self.config.endpoint,
-                token,
-                payload,
-                self.config.timeout_seconds,
+        except Exception:  # noqa: BLE001 - corrupted row must not stall the outbox
+            await asyncio.to_thread(
+                self.store.finish_push, row["id"], error="token_unreadable"
             )
-            await asyncio.to_thread(self.store.finish_push, row["id"], ticket=ticket)
-        except ExpoPermanentError as exc:
-            if str(exc) == "DeviceNotRegistered":
-                await asyncio.to_thread(
-                    self.store.update_device,
-                    row["device_id"],
-                    {"push_token_encrypted": None},
-                )
-            await asyncio.to_thread(self.store.finish_push, row["id"], error=str(exc))
-        except Exception as exc:
-            code = str(exc)[:80] or "push_failed"
-            if attempts + 1 >= self.config.max_attempts:
-                await asyncio.to_thread(self.store.finish_push, row["id"], error=code)
-                return
-            delay = min(3600, 2 ** min(attempts, 10)) + random.random()
+            return
+        payload = json.loads(row["payload_json"])
+        body = build_payload(payload, self.config.max_payload_bytes)
+        try:
+            assert self.client is not None and self.credentials and self.tokens
+            result = await send_apns(
+                self.client,
+                self.credentials,
+                self.tokens,
+                token,
+                environment,
+                body,
+                timeout_seconds=self.config.timeout_seconds,
+                endpoint_override=self.config.endpoint_override,
+            )
             await asyncio.to_thread(
                 self.store.finish_push,
                 row["id"],
-                error=code,
-                retry_at=utcnow() + timedelta(seconds=delay),
+                accepted=True,
+                apns_id=result.apns_id,
             )
-
-    async def _receipt(self, row: dict) -> None:
-        try:
-            assert self.session is not None
-            await check_expo_receipt(
-                self.session,
-                self.config.endpoint,
-                row["provider_ticket_id"],
-                self.config.timeout_seconds,
-            )
-            await asyncio.to_thread(self.store.finish_receipt, row["id"])
-        except ExpoPermanentError as exc:
-            if str(exc) == "DeviceNotRegistered":
-                await asyncio.to_thread(
-                    self.store.update_device,
-                    row["device_id"],
-                    {"push_token_encrypted": None},
-                )
+        except APNsUnregisteredError as exc:
+            # A stale rejection must never revoke a renewed token.
             await asyncio.to_thread(
-                self.store.finish_receipt, row["id"], error=str(exc)
+                self.store.clear_push_token, row["device_id"], secret_hash(token)
             )
-        except Exception as exc:
             await asyncio.to_thread(
-                self.store.finish_receipt,
+                self.store.finish_push,
                 row["id"],
-                error=str(exc)[:80] or "receipt_failed",
-                retry_at=utcnow() + timedelta(seconds=30),
+                error=exc.reason,
+                apns_id=exc.apns_id,
             )
+        except APNsPermanentError as exc:
+            await asyncio.to_thread(
+                self.store.finish_push,
+                row["id"],
+                error=exc.reason,
+                apns_id=exc.apns_id,
+            )
+        except APNsTemporaryError as exc:
+            await self._retry(row, attempts, exc.reason)
+        except Exception as exc:  # noqa: BLE001 - keep the outbox moving
+            await self._retry(row, attempts, str(exc)[:80] or "push_failed")
+
+    async def _retry(self, row: dict, attempts: int, code: str) -> None:
+        if attempts + 1 >= self.config.max_attempts:
+            await asyncio.to_thread(self.store.finish_push, row["id"], error=code)
+            return
+        delay = min(
+            3600, self.config.retry_base_seconds ** min(attempts, 10)
+        ) + random.random()
+        await asyncio.to_thread(
+            self.store.finish_push,
+            row["id"],
+            error=code,
+            retry_at=utcnow() + timedelta(seconds=delay),
+        )

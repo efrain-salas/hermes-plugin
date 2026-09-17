@@ -263,8 +263,9 @@ async def test_system_auth_devices_refresh_and_logout(client, runtime, auth):
             "installation_id": "installation-0001",
             "name": "Renamed",
             "platform": "ios",
-            "push_provider": "expo",
-            "push_token": "ExponentPushToken[abcdefghijk]",
+            "push_provider": "apns",
+            "push_token": "AB" * 32,
+            "push_environment": "sandbox",
             "notifications": {
                 "turn_completed": True,
                 "turn_failed": False,
@@ -273,11 +274,23 @@ async def test_system_auth_devices_refresh_and_logout(client, runtime, auth):
         },
     )
     assert update.status == 200
-    assert (await update.json())["push_registered"] is True
+    updated_device = await update.json()
+    assert updated_device["push_registered"] is True
+    assert updated_device["push_environment"] == "sandbox"
     devices = await client.get("/p/default/v1/mobile/devices", headers=headers)
     body = await devices.json()
     assert body["items"][0]["name"] == "Renamed"
     assert "push_token" not in json.dumps(body)
+
+    retired = await client.post(
+        "/p/default/v1/mobile/devices",
+        headers=headers,
+        json={"push_provider": None},
+    )
+    assert retired.status == 200
+    assert (await retired.json())["push_registered"] is False
+    me = await client.get("/p/default/v1/mobile/me", headers=headers)
+    assert (await me.json())["device"]["push_registered"] is False
 
     refresh = await client.post(
         "/p/default/v1/mobile/auth/refresh",
@@ -301,13 +314,17 @@ async def test_system_auth_devices_refresh_and_logout(client, runtime, auth):
 async def test_push_token_moves_to_latest_device_registration(client, runtime):
     first = await pair_client(client, runtime, installation_id="installation-first")
     second = await pair_client(client, runtime, installation_id="installation-second")
-    push_token = "ExponentPushToken[one-physical-device]"
+    push_token = "ab" * 32
 
     for paired in (first, second):
         response = await client.post(
             "/p/default/v1/mobile/devices",
             headers={"Authorization": f"Bearer {paired['access_token']}"},
-            json={"push_provider": "expo", "push_token": push_token},
+            json={
+                "push_provider": "apns",
+                "push_token": push_token,
+                "push_environment": "production",
+            },
         )
         assert response.status == 200
 
@@ -321,6 +338,76 @@ async def test_push_token_moves_to_latest_device_registration(client, runtime):
     assert runtime.control.enqueue_push(
         "default", "run.completed", "one-run", {"title": "Done"}
     ) == 1
+
+
+async def test_apns_registration_requires_ios_and_hex_token(client, auth):
+    _, headers = auth
+    mismatched = await client.post(
+        "/p/default/v1/mobile/devices",
+        headers=headers,
+        json={
+            "push_provider": "apns",
+            "push_token": "zz" * 32,
+            "push_environment": "sandbox",
+        },
+    )
+    assert mismatched.status == 400
+    missing_environment = await client.post(
+        "/p/default/v1/mobile/devices",
+        headers=headers,
+        json={"push_provider": "apns", "push_token": "aa" * 32},
+    )
+    assert missing_environment.status == 400
+    orphan_token = await client.post(
+        "/p/default/v1/mobile/devices",
+        headers=headers,
+        json={"push_token": "aa" * 32, "push_environment": "sandbox"},
+    )
+    assert orphan_token.status == 400
+    android = await client.post(
+        "/p/default/v1/mobile/devices",
+        headers=headers,
+        json={
+            "platform": "android",
+            "push_provider": "apns",
+            "push_token": "aa" * 32,
+            "push_environment": "sandbox",
+        },
+    )
+    assert android.status == 400
+    legacy_expo = await client.post(
+        "/p/default/v1/mobile/devices",
+        headers=headers,
+        json={"push_provider": "expo", "push_token": "ExponentPushToken[x]"},
+    )
+    assert legacy_expo.status == 400
+
+
+async def test_push_preferences_gate_enqueue(client, runtime, auth):
+    _, headers = auth
+    registered = await client.post(
+        "/p/default/v1/mobile/devices",
+        headers=headers,
+        json={
+            "push_provider": "apns",
+            "push_token": "cd" * 32,
+            "push_environment": "sandbox",
+            "notifications": {"turn_completed": False},
+        },
+    )
+    assert registered.status == 200
+    assert (
+        runtime.control.enqueue_push(
+            "default", "run.completed", "gated-run", {"title": "Done"}
+        )
+        == 0
+    )
+    assert (
+        runtime.control.enqueue_push(
+            "default", "run.failed", "gated-fail", {"title": "Failed"}
+        )
+        == 1
+    )
 
 
 async def test_conversation_full_lifecycle_and_idempotency(client, auth):

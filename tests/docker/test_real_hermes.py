@@ -14,7 +14,7 @@ import yaml
 pytestmark = pytest.mark.docker
 BASE = os.environ.get("HERMES_MOBILE_TEST_URL", "http://127.0.0.1:18642")
 DATA = Path(os.environ.get("HERMES_MOBILE_TEST_DATA", "/tmp/hermes-mobile-test-data"))
-EXPO = os.environ.get("HERMES_MOBILE_EXPO_URL", "http://127.0.0.1:8082")
+APNS = os.environ.get("HERMES_MOBILE_APNS_URL", "http://127.0.0.1:8083")
 
 
 def _fixture(name: str) -> dict:
@@ -140,8 +140,9 @@ async def test_real_multiplexed_hermes_mobile_surface():
                 )[:120],
                 "name": "Docker default",
                 "platform": "ios",
-                "push_provider": "expo",
-                "push_token": "ExponentPushToken[docker-real-device]",
+                "push_provider": "apns",
+                "push_token": "ab" * 32,
+                "push_environment": "sandbox",
             },
         )
         # installation_id is immutable and intentionally rejected when it differs.
@@ -156,11 +157,13 @@ async def test_real_multiplexed_hermes_mobile_surface():
                 "installation_id": me["device"]["installation_id"],
                 "name": "Docker default",
                 "platform": "ios",
-                "push_provider": "expo",
-                "push_token": "ExponentPushToken[docker-real-device]",
+                "push_provider": "apns",
+                "push_token": "ab" * 32,
+                "push_environment": "sandbox",
             },
         )
         assert device.status_code == 200, device.text
+        assert device.json()["push_registered"] is True
 
         model_info = (
             await client.get("/p/default/v1/mobile/models", headers=default_headers)
@@ -318,13 +321,15 @@ async def test_real_multiplexed_hermes_mobile_surface():
         }
 
         for _ in range(40):
-            pushes = (await client.get(f"{EXPO}/messages")).json()["messages"]
+            pushes = (await client.get(f"{APNS}/messages")).json()["messages"]
             if pushes:
                 break
             await asyncio.sleep(0.25)
         assert len(pushes) == 1
-        assert pushes[0]["data"]["profile"] == "default"
-        assert pushes[0]["data"]["conversation_id"] == default_conv["id"]
+        payload = pushes[0]["payload"]
+        assert pushes[0]["token"] == "ab" * 32
+        assert payload["profile"] == "default"
+        assert payload["conversation_id"] == default_conv["id"]
 
         # Quick turns run an in-process lightweight agent (no memory, context
         # files, MCP or review) but still persist to the same native session, so
@@ -447,7 +452,7 @@ async def test_real_multiplexed_hermes_mobile_surface():
         # Exercise a dependency outage in the same authenticated real-world
         # journey. Hermes must complete the run while the push is retained for
         # retry in the durable outbox.
-        await client.post(f"{EXPO}/mode/503")
+        await client.post(f"{APNS}/mode/503")
         failed_push_run = await client.post(
             f"/p/default/v1/mobile/conversations/{default_conv['id']}/runs",
             headers={**default_headers, "Idempotency-Key": str(uuid.uuid4())},
@@ -456,7 +461,7 @@ async def test_real_multiplexed_hermes_mobile_surface():
                 "input": [
                     {
                         "type": "text",
-                        "text": "Complete even if Expo Push is unavailable.",
+                        "text": "Complete even if APNs is unavailable.",
                     }
                 ],
             },
@@ -484,4 +489,4 @@ async def test_real_multiplexed_hermes_mobile_surface():
 
         after = await client.get("/p/default/v1/mobile/health")
         assert after.status_code == 200 and after.json()["status"] == "ok"
-        await client.post(f"{EXPO}/mode/200")
+        await client.post(f"{APNS}/mode/200")

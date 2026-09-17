@@ -12,6 +12,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 class State:
     messages: list[dict] = []
     expo_status = 200
+    apns_status = 200
+    apns_reason = "Unregistered"
+    mode = "expo"
     lock = threading.Lock()
 
 
@@ -21,11 +24,13 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, _format, *_args):
         return
 
-    def _json(self, status: int, payload: dict):
+    def _json(self, status: int, payload: dict, headers: dict | None = None):
         raw = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(raw)
 
@@ -104,7 +109,40 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b"data: [DONE]\n\n")
             else:
                 self._json(200, payload)
-        elif self.path == "/--/api/v2/push/send":
+        elif self.path.startswith("/3/device/"):
+            body = self._body()
+            token = self.path.rsplit("/", 1)[-1]
+            with State.lock:
+                State.messages.append({"token": token, "payload": body})
+                status = State.apns_status
+                reason = State.apns_reason
+            if 200 <= status < 300:
+                self._json(
+                    200,
+                    {"ok": True},
+                    headers={"apns-id": f"apns-{uuid.uuid4().hex}"},
+                )
+            else:
+                self._json(status, {"reason": reason})
+        elif self.path.startswith("/mode/"):
+            value = self.path.rsplit("/", 1)[1]
+            with State.lock:
+                if State.mode == "apns":
+                    State.apns_status = int(value)
+                else:
+                    State.expo_status = int(value)
+            self._json(200, {"status": int(value)})
+        elif self.path.startswith("/reason/"):
+            with State.lock:
+                State.apns_reason = self.path.rsplit("/", 1)[1]
+            self._json(200, {"reason": State.apns_reason})
+        elif self.path == "/reset":
+            with State.lock:
+                State.messages.clear()
+                State.expo_status = 200
+                State.apns_status = 200
+            self._json(200, {"ok": True})
+        elif State.mode == "expo" and self.path == "/--/api/v2/push/send":
             body = self._body()
             with State.lock:
                 State.messages.append(body)
@@ -115,26 +153,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(
                     200, {"data": {"status": "ok", "id": f"ticket-{uuid.uuid4().hex}"}}
                 )
-        elif self.path == "/--/api/v2/push/getReceipts":
+        elif State.mode == "expo" and self.path == "/--/api/v2/push/getReceipts":
             body = self._body()
             self._json(
                 200,
                 {"data": {ticket: {"status": "ok"} for ticket in body.get("ids", [])}},
             )
-        elif self.path.startswith("/mode/"):
-            with State.lock:
-                State.expo_status = int(self.path.rsplit("/", 1)[1])
-            self._json(200, {"status": State.expo_status})
-        elif self.path == "/reset":
-            with State.lock:
-                State.messages.clear()
-                State.expo_status = 200
-            self._json(200, {"ok": True})
         else:
             self._json(404, {"error": "not_found"})
 
 
 if __name__ == "__main__":
     mode = sys.argv[1]
-    port = 8081 if mode == "llm" else 8082
+    State.mode = mode
+    port = {"llm": 8081, "expo": 8082, "apns": 8083}.get(mode, 8083)
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()

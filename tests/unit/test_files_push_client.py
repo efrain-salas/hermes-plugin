@@ -1,32 +1,81 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sys
 import types
 import zipfile
 
-import aiohttp
+import httpx
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from hermes_mobile.api.errors import MobileError
-from hermes_mobile.config import MobileConfig, PushConfig
+from hermes_mobile.config import (
+    APNsCredentials,
+    MobileConfig,
+    PushConfig,
+    PushConfigError,
+)
 from hermes_mobile.constants import REASONING_EFFORTS
 from hermes_mobile.files.extraction import ExtractionError, extract_attachment
 from hermes_mobile.files.tool import read_attachment
 from hermes_mobile.hermes.api_client import HermesAPIClient
-from hermes_mobile.notifications.expo import (
-    ExpoPermanentError,
-    ExpoTemporaryError,
-    check_expo_receipt,
-    send_expo,
+from hermes_mobile.notifications.apns import (
+    APNsPermanentError,
+    APNsResult,
+    APNsTemporaryError,
+    APNsTokenProvider,
+    APNsUnregisteredError,
+    build_payload,
+    classify_response,
+    create_apns_client,
+    encode_apns_jwt,
+    send_apns,
 )
 from hermes_mobile.notifications.worker import PushWorker
-from hermes_mobile.persistence.repositories import ControlStore, ProfileStore
+from hermes_mobile.persistence.repositories import (
+    ControlStore,
+    ProfileStore,
+    secret_hash,
+)
 from hermes_mobile.runtime import MobileRuntime
 from hermes_mobile.security.tokens import SecretBox
+
+
+def _test_key_pem() -> str:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    return key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode("utf-8")
+
+
+def _credentials(pem: str) -> APNsCredentials:
+    return APNsCredentials(
+        team_id="TEAM123456",
+        key_id="KEY1234567",
+        topic="app.hermes.mobile",
+        private_key_pem=pem,
+    )
+
+
+def _register_apns(store: ControlStore, box: SecretBox, device_id: str, token: str, env="sandbox"):
+    store.update_device(
+        device_id,
+        {
+            "push_provider": "apns",
+            "push_environment": env,
+            "push_token_encrypted": box.encrypt(token),
+            "push_token_hash": secret_hash(token),
+        },
+    )
 
 
 def test_extract_text_docx_image_and_reject_binary(tmp_path):
@@ -119,91 +168,247 @@ def test_attachment_tool_is_profile_scoped_and_bounded(tmp_path, monkeypatch):
     assert denied == {"ok": False, "error": "attachment_not_found"}
 
 
-@pytest.mark.asyncio
-async def test_expo_protocol_success_temporary_and_permanent():
-    state = {"status": 200, "body": {"data": {"status": "ok", "id": "ticket-1"}}}
+def test_push_config_requires_complete_apns_credentials():
+    assert PushConfig(enabled=False).configuration_error() is None
+    missing = PushConfig(enabled=True).configuration_error()
+    assert missing is not None and "team_id" in missing
+    broken = PushConfig(
+        enabled=True,
+        team_id="TEAM",
+        key_id="KEY",
+        topic="app.hermes.mobile",
+        private_key="not-a-pem",
+    )
+    with pytest.raises(PushConfigError):
+        broken.validate()
+    secret = "super-secret-pem-value"
+    assert secret not in repr(PushConfig(enabled=True, private_key=secret))
+    _credentials(_test_key_pem())
+    good = PushConfig(
+        enabled=True,
+        team_id="TEAM",
+        key_id="KEY",
+        topic="app.hermes.mobile",
+        private_key=_test_key_pem(),
+    )
+    good.validate()
+    assert (
+        PushConfig(enabled=True, provider="expo", private_key=_test_key_pem())
+        .configuration_error()
+        is not None
+    )
 
-    async def handler(_request):
-        return web.json_response(state["body"], status=state["status"])
 
-    app = web.Application()
-    app.router.add_post("/push", handler)
-    app.router.add_post("/getReceipts", handler)
-    async with TestServer(app) as server, aiohttp.ClientSession() as session:
-        endpoint = str(server.make_url("/push"))
-        assert (
-            await send_expo(session, endpoint, "ExpoPushToken[x]", {"title": "x"}, 2)
-            == "ticket-1"
-        )
-        state["status"] = 503
-        with pytest.raises(ExpoTemporaryError, match="http_503"):
-            await send_expo(session, endpoint, "token", {}, 2)
-        state.update(status=400, body={})
-        with pytest.raises(ExpoPermanentError, match="http_400"):
-            await send_expo(session, endpoint, "token", {}, 2)
-        state.update(
-            status=200,
-            body={
-                "data": {"status": "error", "details": {"error": "DeviceNotRegistered"}}
+def test_apns_jwt_is_es256_verifiable_and_renews_before_an_hour():
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric.utils import (
+        encode_dss_signature,
+    )
+    from cryptography.hazmat.primitives.serialization import (
+        load_pem_private_key,
+    )
+
+    pem = _test_key_pem()
+    credentials = _credentials(pem)
+    now = 1_800_000_000
+    token = encode_apns_jwt(credentials, now)
+    header_b64, claims_b64, signature_b64 = token.split(".")
+
+    def _decode(segment: str) -> dict:
+        padded = segment + "=" * (-len(segment) % 4)
+        return json.loads(__import__("base64").urlsafe_b64decode(padded))
+
+    assert _decode(header_b64) == {"alg": "ES256", "kid": "KEY1234567"}
+    assert _decode(claims_b64) == {"iss": "TEAM123456", "iat": now}
+
+    signature = __import__("base64").urlsafe_b64decode(
+        signature_b64 + "=" * (-len(signature_b64) % 4)
+    )
+    assert len(signature) == 64
+    der = encode_dss_signature(
+        int.from_bytes(signature[:32], "big"),
+        int.from_bytes(signature[32:], "big"),
+    )
+    public_key = load_pem_private_key(pem.encode(), password=None).public_key()
+    public_key.verify(
+        der,
+        f"{header_b64}.{claims_b64}".encode(),
+        ec.ECDSA(hashes.SHA256()),
+    )
+
+    provider = APNsTokenProvider(credentials, ttl_seconds=3300)
+    initial = provider.token(now)
+    assert provider.token(now + 3200) == initial
+    rotated = provider.token(now + 3301)
+    assert rotated != initial
+    assert provider.token(now + 3400) == rotated
+
+
+def test_apns_payload_is_aps_shaped_and_bounded():
+    raw = build_payload(
+        {
+            "title": "Listo",
+            "body": "x" * 20_000,
+            "data": {
+                "type": "run.completed",
+                "conversation_id": "conv_1",
+                "aps": "ignored",
+                "nested": {"ignored": True},
             },
-        )
-        with pytest.raises(ExpoPermanentError, match="DeviceNotRegistered"):
-            await send_expo(session, endpoint, "token", {}, 2)
-        state["body"] = {"unexpected": True}
-        with pytest.raises(ExpoTemporaryError, match="invalid_response"):
-            await send_expo(session, endpoint, "token", {}, 2)
-        state["body"] = {"data": {"ticket-1": {"status": "ok"}}}
-        await check_expo_receipt(session, endpoint, "ticket-1", 2)
-        state["body"] = {"data": {}}
-        with pytest.raises(ExpoTemporaryError, match="receipt_pending"):
-            await check_expo_receipt(session, endpoint, "ticket-1", 2)
-        state.update(status=503, body={})
-        with pytest.raises(ExpoTemporaryError, match="receipt_http_503"):
-            await check_expo_receipt(session, endpoint, "ticket-1", 2)
-        state.update(status=400, body={})
-        with pytest.raises(ExpoPermanentError, match="receipt_http_400"):
-            await check_expo_receipt(session, endpoint, "ticket-1", 2)
-        state.update(
-            status=200,
-            body={
-                "data": {
-                    "ticket-1": {
-                        "status": "error",
-                        "details": {"error": "DeviceNotRegistered"},
-                    }
-                }
-            },
-        )
-        with pytest.raises(ExpoPermanentError, match="DeviceNotRegistered"):
-            await check_expo_receipt(session, endpoint, "ticket-1", 2)
+        },
+        max_bytes=512,
+    )
+    assert len(raw) <= 512
+    decoded = json.loads(raw)
+    assert decoded["aps"]["alert"]["title"] == "Listo"
+    assert decoded["aps"]["sound"] == "default"
+    assert decoded["conversation_id"] == "conv_1"
+    assert "aps" not in {key for key in decoded if key != "aps"}
+    assert "nested" not in decoded
+
+    small = json.loads(build_payload({"title": "T", "body": "B", "data": {}}))
+    assert small == {"aps": {"alert": {"title": "T", "body": "B"}, "sound": "default"}}
+
+    huge = build_payload(
+        {"title": "T" * 10_000, "body": "B", "data": {"conversation_id": "conv_9"}},
+        max_bytes=256,
+    )
+    assert len(huge) <= 256
+    decoded_huge = json.loads(huge)
+    assert decoded_huge["conversation_id"] == "conv_9"
+    assert decoded_huge["aps"]["alert"]
+
+
+def test_apns_response_classification():
+    assert classify_response(200, None) is None
+    assert isinstance(classify_response(429, "TooManyRequests"), APNsTemporaryError)
+    assert isinstance(classify_response(503, "ServiceUnavailable"), APNsTemporaryError)
+    assert isinstance(
+        classify_response(403, "ExpiredProviderToken"), APNsTemporaryError
+    )
+    expired = classify_response(410, "Unregistered", "apns-9")
+    assert isinstance(expired, APNsUnregisteredError)
+    assert expired.apns_id == "apns-9"
+    assert isinstance(classify_response(400, "BadDeviceToken"), APNsPermanentError)
+    assert isinstance(classify_response(403, "BadCertificate"), APNsPermanentError)
+
+
+def test_create_apns_client_enables_http2(monkeypatch):
+    captured: dict = {}
+
+    class DummyClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("hermes_mobile.notifications.apns.httpx.AsyncClient", DummyClient)
+    create_apns_client(12)
+    assert captured["http2"] is True
+    assert isinstance(captured["timeout"], httpx.Timeout)
 
 
 @pytest.mark.asyncio
-async def test_push_worker_delivery_retry_and_device_revocation(tmp_path, monkeypatch):
-    store = ControlStore(tmp_path / "control.db")
-    store.initialize()
+async def test_apns_transport_host_headers_and_errors():
+    pem = _test_key_pem()
+    credentials = _credentials(pem)
+    provider = APNsTokenProvider(credentials)
+    captured: list[httpx.Request] = []
+    state = {"status": 200, "reason": None}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if state["status"] == 200:
+            return httpx.Response(200, headers={"apns-id": "apns-ok"})
+        return httpx.Response(
+            state["status"], json={"reason": state["reason"]}
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        payload = build_payload({"title": "Hola", "body": "Cuerpo", "data": {"run_id": "r1"}})
+        result = await send_apns(
+            client, credentials, provider, "aabbccdd", "sandbox", payload
+        )
+        assert result == APNsResult(apns_id="apns-ok")
+        request = captured[-1]
+        assert request.url.host == "api.sandbox.push.apple.com"
+        assert request.url.path == "/3/device/aabbccdd"
+        assert request.headers["apns-topic"] == "app.hermes.mobile"
+        assert request.headers["apns-push-type"] == "alert"
+        assert request.headers["apns-priority"] == "10"
+        assert request.headers["authorization"].startswith("bearer ")
+        assert json.loads(request.content)["aps"]["alert"]["title"] == "Hola"
+
+        await send_apns(
+            client, credentials, provider, "aabbccdd", "production", payload
+        )
+        assert captured[-1].url.host == "api.push.apple.com"
+
+        state.update(status=410, reason="Unregistered")
+        with pytest.raises(APNsUnregisteredError):
+            await send_apns(
+                client, credentials, provider, "aabbccdd", "sandbox", payload
+            )
+        state.update(status=429, reason="TooManyRequests")
+        with pytest.raises(APNsTemporaryError):
+            await send_apns(
+                client, credentials, provider, "aabbccdd", "sandbox", payload
+            )
+
+        state.update(status=200, reason=None)
+        await send_apns(
+            client,
+            credentials,
+            provider,
+            "aabbccdd",
+            "sandbox",
+            payload,
+            endpoint_override="https://example.test/3/device/{token}",
+        )
+        assert captured[-1].url.host == "example.test"
+        assert captured[-1].url.path == "/3/device/aabbccdd"
+
+        with pytest.raises(APNsPermanentError):
+            await send_apns(
+                client, credentials, provider, "aabbccdd", "bogus-env", payload
+            )
+
+
+def _pair_device(store: ControlStore) -> dict:
     pair = store.create_pairing("default", "Alice", 600)
-    paired = store.consume_pairing(
+    return store.consume_pairing(
         "default",
         pair["token"],
         {"installation_id": "push-install", "name": "Phone", "platform": "ios"},
         ("devices:self",),
     )
+
+
+def _worker(store: ControlStore, box: SecretBox, **overrides) -> PushWorker:
+    worker = PushWorker(store, box, PushConfig(enabled=True, max_attempts=2, **overrides))
+    worker.client = object()
+    worker.credentials = object()
+    worker.tokens = object()
+    return worker
+
+
+@pytest.mark.asyncio
+async def test_push_worker_delivery_and_unregistered_token(tmp_path, monkeypatch):
+    store = ControlStore(tmp_path / "control.db")
+    store.initialize()
+    paired = _pair_device(store)
     box = SecretBox(tmp_path / "data.key")
     device_id = paired["device"]["id"]
-    store.update_device(
-        device_id, {"push_token_encrypted": box.encrypt("ExpoPushToken[test]")}
-    )
-    store.enqueue_push("default", "run.completed", "run-1", {"title": "Done"})
-    worker = PushWorker(
-        store, box, PushConfig(enabled=True, endpoint="http://unused", max_attempts=2)
-    )
-    worker.session = aiohttp.ClientSession()
+    token = "aa" * 32
+    _register_apns(store, box, device_id, token)
+    assert store.enqueue_push("default", "run.completed", "run-1", {"title": "Done"}) == 1
+
+    worker = _worker(store, box)
 
     async def delivered(*_args, **_kwargs):
-        return "ticket-ok"
+        return APNsResult(apns_id="apns-ok")
 
-    monkeypatch.setattr("hermes_mobile.notifications.worker.send_expo", delivered)
+    monkeypatch.setattr("hermes_mobile.notifications.worker.send_apns", delivered)
     await worker._send(store.pending_push()[0])
     with store.connect() as conn:
         row = dict(
@@ -211,73 +416,155 @@ async def test_push_worker_delivery_retry_and_device_revocation(tmp_path, monkey
                 "SELECT * FROM notification_outbox WHERE dedupe_key='run-1'"
             ).fetchone()
         )
-    assert (
-        row["status"] == "receipt_pending" and row["provider_ticket_id"] == "ticket-ok"
-    )
-
-    async def receipt_ok(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(
-        "hermes_mobile.notifications.worker.check_expo_receipt", receipt_ok
-    )
-    await worker._receipt(
-        {**row, "push_token_encrypted": box.encrypt("ExpoPushToken[test]")}
-    )
-    with store.connect() as conn:
-        assert (
-            conn.execute(
-                "SELECT status FROM notification_outbox WHERE dedupe_key='run-1'"
-            ).fetchone()[0]
-            == "delivered"
-        )
+    assert row["status"] == "delivered"
+    assert row["provider_ticket_id"] == "apns-ok"
+    assert row["delivered_at"] is not None
 
     store.enqueue_push("default", "run.failed", "run-2", {"title": "Failed"})
 
     async def gone(*_args, **_kwargs):
-        raise ExpoPermanentError("DeviceNotRegistered")
+        raise APNsUnregisteredError("Unregistered", status=410, apns_id="apns-gone")
 
-    monkeypatch.setattr("hermes_mobile.notifications.worker.send_expo", gone)
+    monkeypatch.setattr("hermes_mobile.notifications.worker.send_apns", gone)
     await worker._send(store.pending_push()[0])
-    assert store.list_devices(paired["user"]["id"])[0]["push_token_encrypted"] is None
-    await worker.close()
+    device = store.get_device(device_id)
+    assert device["push_token_encrypted"] is None
+    assert device["push_environment"] is None
+    with store.connect() as conn:
+        failed = dict(
+            conn.execute(
+                "SELECT * FROM notification_outbox WHERE dedupe_key='run-2'"
+            ).fetchone()
+        )
+    assert failed["status"] == "failed" and failed["last_error_code"] == "Unregistered"
+
+
+@pytest.mark.asyncio
+async def test_stale_410_does_not_revoke_a_renewed_token(tmp_path, monkeypatch):
+    store = ControlStore(tmp_path / "control.db")
+    store.initialize()
+    paired = _pair_device(store)
+    box = SecretBox(tmp_path / "data.key")
+    device_id = paired["device"]["id"]
+    old_token = "bb" * 32
+    new_token = "cc" * 32
+    _register_apns(store, box, device_id, old_token)
+    store.enqueue_push("default", "run.completed", "run-old", {"title": "Done"})
+    row = store.pending_push()[0]
+    # The device rotates to a fresh token while the old delivery is in flight.
+    _register_apns(store, box, device_id, new_token)
+
+    worker = _worker(store, box)
+    assert box.decrypt(row["push_token_encrypted"]) == old_token
+
+    async def gone(*_args, **_kwargs):
+        raise APNsUnregisteredError("Unregistered", status=410)
+
+    monkeypatch.setattr("hermes_mobile.notifications.worker.send_apns", gone)
+    await worker._send(row)
+    device = store.get_device(device_id)
+    assert device["push_token_encrypted"] is not None
+    assert box.decrypt(device["push_token_encrypted"]) == new_token
 
 
 @pytest.mark.asyncio
 async def test_push_worker_temporary_retry_and_attempt_limit(tmp_path, monkeypatch):
     store = ControlStore(tmp_path / "control.db")
     store.initialize()
-    pair = store.create_pairing("default", "Alice", 600)
-    paired = store.consume_pairing(
-        "default",
-        pair["token"],
-        {"installation_id": "push-install", "name": "Phone", "platform": "ios"},
-        ("devices:self",),
-    )
+    paired = _pair_device(store)
     box = SecretBox(tmp_path / "data.key")
-    store.update_device(
-        paired["device"]["id"], {"push_token_encrypted": box.encrypt("token")}
-    )
+    device_id = paired["device"]["id"]
+    _register_apns(store, box, device_id, "dd" * 32)
     store.enqueue_push("default", "run.completed", "retry", {"title": "Done"})
-    worker = PushWorker(
-        store, box, PushConfig(enabled=True, endpoint="http://unused", max_attempts=2)
-    )
-    worker.session = aiohttp.ClientSession()
+    worker = _worker(store, box)
 
     async def temporary(*_args, **_kwargs):
-        raise ExpoTemporaryError("offline")
+        raise APNsTemporaryError("ServiceUnavailable", status=503)
 
-    monkeypatch.setattr("hermes_mobile.notifications.worker.send_expo", temporary)
-    row = store.pending_push()[0]
-    await worker._send(row)
+    monkeypatch.setattr("hermes_mobile.notifications.worker.send_apns", temporary)
+    await worker._send(store.pending_push()[0])
     with store.connect() as conn:
         pending = dict(conn.execute("SELECT * FROM notification_outbox").fetchone())
     assert pending["status"] == "pending" and pending["attempts"] == 1
-    await worker._send({**pending, "push_token_encrypted": box.encrypt("token")})
+    await worker._send({**pending, "push_provider": "apns", "push_environment": "sandbox"})
     with store.connect() as conn:
         failed = conn.execute("SELECT * FROM notification_outbox").fetchone()
     assert failed["status"] == "failed" and failed["attempts"] == 2
-    await worker.close()
+
+
+@pytest.mark.asyncio
+async def test_push_worker_run_delivers_through_apns_transport(tmp_path, monkeypatch):
+    store = ControlStore(tmp_path / "control.db")
+    store.initialize()
+    paired = _pair_device(store)
+    box = SecretBox(tmp_path / "data.key")
+    device_id = paired["device"]["id"]
+    token = "ee" * 32
+    _register_apns(store, box, device_id, token)
+    store.enqueue_push("default", "run.completed", "run-transport", {"title": "Hola"})
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, headers={"apns-id": "apns-e2e"})
+
+    config = PushConfig(
+        enabled=True,
+        team_id="TEAM",
+        key_id="KEY",
+        topic="app.hermes.mobile",
+        private_key=_test_key_pem(),
+        max_attempts=2,
+        endpoint_override="https://apns.test/3/device/{token}",
+    )
+    worker = PushWorker(store, box, config)
+    monkeypatch.setattr(
+        "hermes_mobile.notifications.worker.create_apns_client",
+        lambda *_args, **_kwargs: httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ),
+    )
+    task = asyncio.create_task(worker.run())
+    try:
+        for _ in range(100):
+            with store.connect() as conn:
+                row = conn.execute(
+                    "SELECT status FROM notification_outbox "
+                    "WHERE dedupe_key='run-transport'"
+                ).fetchone()
+            if row and row[0] == "delivered":
+                break
+            await asyncio.sleep(0.02)
+        assert row[0] == "delivered"
+    finally:
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+        await worker.close()
+    assert seen
+    assert seen[0].url.path == f"/3/device/{token}"
+    assert seen[0].headers["apns-topic"] == "app.hermes.mobile"
+    assert seen[0].headers["authorization"].startswith("bearer ")
+    assert json.loads(seen[0].content)["aps"]["alert"]["title"] == "Hola"
+
+
+def test_legacy_expo_registrations_never_reach_apns(tmp_path):
+    store = ControlStore(tmp_path / "control.db")
+    store.initialize()
+    paired = _pair_device(store)
+    box = SecretBox(tmp_path / "data.key")
+    device_id = paired["device"]["id"]
+    store.update_device(
+        device_id,
+        {"push_provider": "expo", "push_token_encrypted": box.encrypt("ExponentPushToken[x]")},
+    )
+    # Re-running initialize simulates upgrading a database with legacy rows.
+    store.initialize()
+    device = store.get_device(device_id)
+    assert device["push_provider"] is None
+    assert device["push_token_encrypted"] is None
+    assert store.enqueue_push("default", "run.completed", "legacy", {"title": "x"}) == 0
+
 
 
 @pytest.mark.asyncio

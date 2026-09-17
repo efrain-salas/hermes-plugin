@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-mobile"
-version = "1.7.0"
+version = "1.8.0"
 description = "Secure, profile-scoped mobile API for Hermes Gateway"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -13,6 +13,7 @@ authors = [{ name = "Hermes Mobile contributors" }]
 dependencies = [
   "aiohttp>=3.10,<4",
   "cryptography>=43,<51",
+  "httpx[http2]>=0.27,<1",
   "pydantic>=2.9,<3",
   "PyYAML>=6,<7",
   "qrcode>=8,<9",
@@ -25,7 +26,6 @@ test = [
   "pytest>=8.3,<10",
   "pytest-asyncio>=0.24,<2",
   "pytest-cov>=6,<8",
-  "httpx>=0.27,<1",
   "jsonschema>=4.23,<5",
 ]
 

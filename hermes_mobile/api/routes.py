@@ -34,6 +34,7 @@ from ..persistence.repositories import (
     StoreError,
     iso,
     json_dump,
+    secret_hash,
 )
 from ..runtime import SCHEDULED_TASK_INSTRUCTIONS, MobileRuntime
 from ..security.tokens import TokenError
@@ -644,6 +645,11 @@ class MobileAPI:
 
     @staticmethod
     def _device_resource(row: dict[str, Any], current: bool = False) -> dict[str, Any]:
+        registered = (
+            row.get("push_provider") == "apns"
+            and bool(row.get("push_token_encrypted"))
+            and bool(row.get("push_environment"))
+        )
         return {
             "id": row.get("id") or row.get("device_id"),
             "installation_id": row.get("installation_id"),
@@ -652,7 +658,9 @@ class MobileAPI:
             "app_version": row.get("app_version"),
             "locale": row.get("locale"),
             "timezone": row.get("timezone"),
-            "push_registered": bool(row.get("push_token_encrypted")),
+            "push_registered": registered,
+            "push_provider": row.get("push_provider"),
+            "push_environment": row.get("push_environment"),
             "revoked_at": row.get("revoked_at"),
             "current": current,
         }
@@ -687,6 +695,7 @@ class MobileAPI:
     ) -> web.Response:
         await self._ensure_device_access(subject, device_id)
         body = await self._body(request, DeviceUpdate)
+        provided = body.model_fields_set
         values = body.model_dump(exclude_none=True)
         if (
             values.get("installation_id")
@@ -695,11 +704,27 @@ class MobileAPI:
             raise MobileError("forbidden", "No se puede cambiar installation_id.", 403)
         values.pop("installation_id", None)
         push_token = values.pop("push_token", None)
-        if push_token:
+        if "push_provider" in provided and body.push_provider is None:
+            # Removal contract: {"push_provider": null} deactivates push.
+            values["push_provider"] = None
+            values["push_token_encrypted"] = None
+            values["push_token_hash"] = None
+            values["push_environment"] = None
+        elif body.push_provider == "apns":
+            device = await asyncio.to_thread(
+                self.runtime.control.get_device, device_id
+            )
+            effective_platform = body.platform or (device or {}).get("platform")
+            if effective_platform != "ios":
+                raise MobileError(
+                    "invalid_request",
+                    "El registro APNs requiere un dispositivo iOS.",
+                    400,
+                )
+            assert push_token is not None
+            values["push_provider"] = "apns"
             values["push_token_encrypted"] = self.runtime.box.encrypt(push_token)
-            values["push_token_hash"] = hashlib.sha256(
-                push_token.encode("utf-8")
-            ).hexdigest()
+            values["push_token_hash"] = secret_hash(push_token)
         if "notifications" in values:
             values["notification_preferences_json"] = json_dump(
                 values.pop("notifications")

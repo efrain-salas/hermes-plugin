@@ -93,6 +93,12 @@ class MobileRuntime:
                 "Disabled %d duplicate push registration(s)",
                 removed_push_duplicates,
             )
+        expired_legacy = await asyncio.to_thread(self.control.resolve_legacy_outbox)
+        if expired_legacy:
+            logger.info(
+                "Expired %d legacy push delivery(ies) with no APNs target",
+                expired_legacy,
+            )
         for profile in await asyncio.to_thread(self.control.profile_ids):
             await asyncio.to_thread(self.store, profile)
         await self.facade.start()
