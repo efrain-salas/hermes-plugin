@@ -386,12 +386,17 @@ class MobileRuntime:
                         response_text += self._content_text(
                             data.get("delta") or data.get("text")
                         )[:remaining]
-                elif event_type == "message.completed":
-                    completed_text = self._content_text(
-                        data.get("content") or data.get("text")
+                elif event_type in {"message.completed", "run.completed"}:
+                    # ``/v1/runs`` never emits a completed message event: it streams
+                    # every assistant segment as ``message.delta`` and publishes the
+                    # authoritative final answer as ``output`` on ``run.completed``.
+                    # Accumulated deltas mix earlier segments (e.g. pre-tool-call
+                    # preambles), so prefer the terminal payload when present.
+                    final_text = self._content_text(
+                        data.get("content") or data.get("output") or data.get("text")
                     )
-                    if completed_text:
-                        response_text = completed_text[:NOTIFICATION_CAPTURE_MAX_CHARS]
+                    if final_text:
+                        response_text = final_text[:NOTIFICATION_CAPTURE_MAX_CHARS]
                 current = await asyncio.to_thread(store.run, public_run_id)
                 if (
                     current
@@ -513,7 +518,11 @@ class MobileRuntime:
                 native_messages = await self.facade.get_messages(
                     profile, session_id, limit=10, order="latest"
                 )
-                for message in native_messages.get("data", []):
+                # ``order=latest`` pages the newest rows but returns them in
+                # chronological order, so the last assistant message is found
+                # by walking backwards; taking the first one would surface an
+                # older reply from an earlier turn.
+                for message in reversed(native_messages.get("data", [])):
                     if message.get("role") != "assistant":
                         continue
                     body = self._notification_excerpt(message.get("content"))

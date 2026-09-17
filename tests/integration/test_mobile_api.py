@@ -72,6 +72,11 @@ async def test_completed_run_notification_uses_conversation_and_response(
         {"role": "user", "content": "Pregunta"},
         {
             "role": "assistant",
+            "content": [{"type": "text", "text": "Respuesta anterior"}],
+        },
+        {"role": "user", "content": "Otra pregunta"},
+        {
+            "role": "assistant",
             "content": [{"type": "text", "text": "Respuesta recuperada"}],
         },
     ]
@@ -84,6 +89,37 @@ async def test_completed_run_notification_uses_conversation_and_response(
     )
     excerpt = runtime._notification_excerpt("x" * 300)
     assert len(excerpt) == 240 and excerpt.endswith("…")
+
+
+async def test_notification_prefers_terminal_output_over_streamed_segments(
+    runtime, fake_facade, monkeypatch
+):
+    native = await fake_facade.create_conversation("default", {"title": "Viaje"})
+    session_id = native["session"]["id"]
+    store = runtime.store("default")
+    conversation = store.ensure_conversation(session_id)
+    run = store.create_run(conversation["public_id"], "runs-stream-run", None)
+
+    async def stream_run_events(_profile, _run_id):
+        yield {"event": "run.started"}
+        yield {"event": "message.delta", "delta": "Déjame comprobar el clima."}
+        yield {"event": "tool.started", "tool_name": "web_search"}
+        yield {"event": "tool.completed", "tool_name": "web_search"}
+        yield {"event": "message.delta", "delta": "La capital es París."}
+        yield {"event": "run.completed", "output": "La capital es París."}
+
+    pushes = []
+
+    def capture_push(profile, kind, dedupe_key, payload):
+        pushes.append((kind, payload["body"]))
+        return 1
+
+    monkeypatch.setattr(fake_facade, "stream_run_events", stream_run_events)
+    monkeypatch.setattr(runtime.control, "enqueue_push", capture_push)
+
+    await runtime._mirror_run("default", run["public_id"], "runs-stream-run")
+
+    assert pushes == [("run.completed", "La capital es París.")]
 
 
 async def test_unified_inbox_can_open_conversation_and_reply(
