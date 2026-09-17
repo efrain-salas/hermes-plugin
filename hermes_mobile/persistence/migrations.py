@@ -1,5 +1,5 @@
 CONTROL_SCHEMA_VERSION = 4
-PROFILE_SCHEMA_VERSION = 5
+PROFILE_SCHEMA_VERSION = 6
 
 CONTROL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -139,6 +139,8 @@ CREATE TABLE IF NOT EXISTS conversation_map (
         )
     ),
     last_read_message_id TEXT,
+    read_at TEXT,
+    activity_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     deleted_at TEXT

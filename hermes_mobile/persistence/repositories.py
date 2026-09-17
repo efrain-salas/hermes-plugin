@@ -913,6 +913,10 @@ class ProfileStore(SQLiteStore):
                 "CHECK(reasoning_effort IS NULL OR reasoning_effort IN "
                 "('none','minimal','low','medium','high','xhigh','max','ultra'))"
             )
+        if "read_at" not in columns:
+            conn.execute("ALTER TABLE conversation_map ADD COLUMN read_at TEXT")
+        if "activity_at" not in columns:
+            conn.execute("ALTER TABLE conversation_map ADD COLUMN activity_at TEXT")
         run_columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
         if "mode" not in run_columns:
             conn.execute(
@@ -983,6 +987,8 @@ class ProfileStore(SQLiteStore):
             "archived",
             "reasoning_effort",
             "last_read_message_id",
+            "read_at",
+            "activity_at",
             "deleted_at",
         }
         clean = {k: v for k, v in fields.items() if k in allowed}

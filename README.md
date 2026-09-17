@@ -97,6 +97,22 @@ Cuando `public_base_url` está configurada, la URI incluye también el host y la
 emparejamiento escaneando el QR sin pedir al usuario que copie una dirección. Los clientes antiguos
 pueden ignorar ese parámetro adicional.
 
+## Conversaciones
+
+El orden del historial y el indicador de no leídos son propiedad del plugin, no de Hermes. La API
+`GET /conversations` devuelve `updated_at` a partir de la última actividad real (el `last_active`
+nativo) y de `activity_at`, un sellado local que el plugin fija al crear una conversación, al
+enviar un turno y, sobre todo, al **bifurcar**. Una rama copia el transcript de su origen tal cual,
+incluidas sus marcas de tiempo, por lo que sin ese sellado aparecería enterrada en la posición
+histórica de la conversación original.
+
+`unread` se calcula con el watermark local `read_at`: una conversación sin watermark se considera
+leída (igual que Hermes, para no marcar todo el historial preexistente de golpe). El plugin avanza
+`read_at` cuando el cliente descarga los mensajes (`GET /conversations/{id}/messages`), abre la
+conversación (`POST /conversations/{id}/read`) o envía un turno, y lo deja atrás cuando llega
+actividad nueva. Al bifurcar, el origen queda leído y la rama nace activa y leída, de modo que la
+actividad de la rama nunca marca la conversación original.
+
 ## Notificaciones push (APNs)
 
 Las notificaciones se entregan directamente por Apple Push Notification service con autenticación por

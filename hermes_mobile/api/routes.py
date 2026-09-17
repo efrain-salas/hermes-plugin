@@ -10,7 +10,7 @@ import secrets
 import time
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
-from datetime import UTC
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -775,6 +775,15 @@ class MobileAPI:
             if run and run["status"] in {"running", "waiting_for_approval"}
             else "idle"
         )
+        # Conversation ordering and the unread badge are owned by the plugin,
+        # not by Hermes: a branch copies its source's message timestamps, so
+        # trusting the native ``last_active`` would file the new conversation
+        # at the historical position of the original. ``activity_at`` pins the
+        # branch as freshly active; ``read_at`` is the plugin's own watermark.
+        activity_at = self._latest_iso(
+            session.get("last_active"), mapping.get("activity_at")
+        ) or mapping["updated_at"]
+        read_at = mapping.get("read_at")
         return {
             "id": mapping["public_id"],
             "title": mapping.get("title_override") or session.get("title"),
@@ -783,22 +792,42 @@ class MobileAPI:
             "status": status,
             "archived": bool(mapping.get("archived") or session.get("archived")),
             "pinned": bool(mapping.get("pinned") or session.get("pinned")),
-            "unread": bool(session.get("unread", False)),
+            "unread": bool(read_at) and activity_at > read_at,
             "preview": session.get("preview"),
             "last_run_id": run["public_id"] if run else None,
             "created_at": self._as_time(session.get("started_at"))
             or mapping["created_at"],
-            "updated_at": self._as_time(session.get("last_active"))
-            or mapping["updated_at"],
+            "updated_at": activity_at,
         }
 
     @staticmethod
     def _as_time(value: Any) -> str | None:
         if isinstance(value, (float, int)):
-            from datetime import datetime
-
             return iso(datetime.fromtimestamp(value, UTC))
         return value if isinstance(value, str) else None
+
+    @staticmethod
+    def _time_value(value: Any) -> datetime | None:
+        if isinstance(value, (float, int)):
+            return datetime.fromtimestamp(value, UTC)
+        if isinstance(value, str) and value.strip():
+            try:
+                parsed = datetime.fromisoformat(value.strip())
+            except ValueError:
+                return None
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        return None
+
+    @classmethod
+    def _latest_iso(cls, *values: Any) -> str | None:
+        parsed = [
+            moment
+            for value in values
+            if (moment := cls._time_value(value)) is not None
+        ]
+        if not parsed:
+            return None
+        return iso(max(parsed))
 
     async def conversations(
         self, request: web.Request, _subject: dict | None
@@ -940,6 +969,12 @@ class MobileAPI:
         mapping = await asyncio.to_thread(
             store.ensure_conversation, str(native["session"]["id"]), native["session"]
         )
+        now = iso()
+        await asyncio.to_thread(
+            store.update_conversation,
+            mapping["public_id"],
+            {"activity_at": now, "read_at": now},
+        )
         if update_reasoning:
             await asyncio.to_thread(
                 store.update_conversation,
@@ -1052,6 +1087,21 @@ class MobileAPI:
         native = await self.runtime.facade.fork_conversation(
             profile, row["hermes_session_id"], {"title": body.title}
         )
+        resource = await self._conversation_resource(profile, native["session"], store)
+        now = iso()
+        # The branch copies the source transcript verbatim, so its native
+        # ``last_active`` is the source's historical timestamp. Pinning the
+        # branch as active now keeps it at the top of the history. Reading the
+        # source also clears its badge so the branch's activity can never be
+        # attributed to the original.
+        await asyncio.to_thread(
+            store.update_conversation,
+            resource["id"],
+            {"activity_at": now, "read_at": now},
+        )
+        await asyncio.to_thread(
+            store.update_conversation, row["public_id"], {"read_at": now}
+        )
         return self._json(
             await self._conversation_resource(profile, native["session"], store), 201
         )
@@ -1064,7 +1114,7 @@ class MobileAPI:
         await asyncio.to_thread(
             store.update_conversation,
             row["public_id"],
-            {"last_read_message_id": body.message_id},
+            {"last_read_message_id": body.message_id, "read_at": iso()},
         )
         return web.Response(status=204)
 
@@ -1137,6 +1187,12 @@ class MobileAPI:
                     "created_at": self._as_time(message.get("timestamp")) or iso(),
                 }
             )
+        # Fetching a conversation's messages means the client is reading it:
+        # advance the plugin watermark so the unread badge clears here instead
+        # of leaking onto another branch.
+        await asyncio.to_thread(
+            store.update_conversation, row["public_id"], {"read_at": iso()}
+        )
         return self._json(
             {"items": items, "next_cursor": None, "has_more": len(items) >= limit}
         )
@@ -1271,6 +1327,12 @@ class MobileAPI:
             hermes_run_id,
             body.client_message_id,
         )
+        now = iso()
+        await asyncio.to_thread(
+            store.update_conversation,
+            conversation["public_id"],
+            {"activity_at": now, "read_at": now},
+        )
         await asyncio.to_thread(store.append_event, run["public_id"], "run.queued", {})
         user_message_id = await asyncio.to_thread(
             store.ensure_message,
@@ -1315,6 +1377,12 @@ class MobileAPI:
             hermes_run_id,
             client_message_id,
             mode="quick",
+        )
+        now = iso()
+        await asyncio.to_thread(
+            store.update_conversation,
+            conversation["public_id"],
+            {"activity_at": now, "read_at": now},
         )
         await asyncio.to_thread(store.append_event, run["public_id"], "run.queued", {})
         user_message_id = await asyncio.to_thread(
@@ -1630,6 +1698,12 @@ class MobileAPI:
             str(remote.get("run_id") or remote.get("id")),
             None,
         )
+        now = iso()
+        await asyncio.to_thread(
+            store.update_conversation,
+            run["conversation_id"],
+            {"activity_at": now, "read_at": now},
+        )
         await asyncio.to_thread(
             store.append_event, new_run["public_id"], "run.queued", {}
         )
@@ -1806,6 +1880,12 @@ class MobileAPI:
                 store.ensure_conversation,
                 str(native["session"]["id"]),
                 native["session"],
+            )
+            now = iso()
+            await asyncio.to_thread(
+                store.update_conversation,
+                conversation["public_id"],
+                {"activity_at": now, "read_at": now},
             )
             await asyncio.to_thread(
                 store.update_inbox_item,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 from aiohttp import FormData
 from conftest import pair_client
@@ -502,6 +503,87 @@ async def test_conversation_full_lifecycle_and_idempotency(client, auth):
             f"/p/default/v1/mobile/conversations/{conversation['id']}", headers=headers
         )
     ).status == 404
+
+
+async def _conversation_listing(client, headers):
+    response = await client.get(
+        "/p/default/v1/mobile/conversations", headers=headers
+    )
+    assert response.status == 200
+    return {item["id"]: item for item in (await response.json())["items"]}
+
+
+async def test_fork_lands_at_the_top_and_never_badges_the_source(
+    client, runtime, fake_facade, auth
+):
+    _, headers = auth
+    store = runtime.store("default")
+    native = await fake_facade.create_conversation("default", {"title": "Origen"})
+    session_id = native["session"]["id"]
+    # The source looks historically old, as a branch would inherit it verbatim.
+    fake_facade.sessions["default"][session_id]["started_at"] = 1_700_000_000.0
+    fake_facade.sessions["default"][session_id]["last_active"] = 1_700_000_000.0
+    source = store.ensure_conversation(session_id)
+
+    listing = await _conversation_listing(client, headers)
+    assert listing[source["public_id"]]["unread"] is False
+
+    forked = await client.post(
+        f"/p/default/v1/mobile/conversations/{source['public_id']}/fork",
+        headers=headers,
+        json={"message_id": "msg_1"},
+    )
+    assert forked.status == 201, await forked.text()
+    branch = await forked.json()
+    assert branch["id"] != source["public_id"]
+    # The branch is brand new even though its transcript is a copy.
+    assert branch["updated_at"] > listing[source["public_id"]]["updated_at"]
+    assert branch["unread"] is False
+    assert store.conversation(source["public_id"])["read_at"] is not None
+
+    # Activity that lands on the branch must never mark the original unread.
+    branch_session = store.conversation(branch["id"])["hermes_session_id"]
+    await asyncio.sleep(0.02)
+    fake_facade.sessions["default"][branch_session]["last_active"] = time.time()
+    listing = await _conversation_listing(client, headers)
+    assert listing[branch["id"]]["unread"] is True
+    assert listing[source["public_id"]]["unread"] is False
+
+
+async def test_conversation_unread_is_a_plugin_owned_watermark(
+    client, runtime, fake_facade, auth
+):
+    _, headers = auth
+    store = runtime.store("default")
+    native = await fake_facade.create_conversation("default", {"title": "Marca"})
+    session_id = native["session"]["id"]
+    convo = store.ensure_conversation(session_id)
+
+    # A conversation the server has never tracked is read, not flooded.
+    listing = await _conversation_listing(client, headers)
+    assert listing[convo["public_id"]]["unread"] is False
+
+    # Opening it stamps the watermark.
+    opened = await client.get(
+        f"/p/default/v1/mobile/conversations/{convo['public_id']}/messages",
+        headers=headers,
+    )
+    assert opened.status == 200
+
+    # Native activity after the watermark flips it unread...
+    await asyncio.sleep(0.02)
+    fake_facade.sessions["default"][session_id]["last_active"] = time.time()
+    listing = await _conversation_listing(client, headers)
+    assert listing[convo["public_id"]]["unread"] is True
+
+    # ...and reading it again clears the badge.
+    await asyncio.sleep(0.02)
+    await client.get(
+        f"/p/default/v1/mobile/conversations/{convo['public_id']}/messages",
+        headers=headers,
+    )
+    listing = await _conversation_listing(client, headers)
+    assert listing[convo["public_id"]]["unread"] is False
 
 
 async def test_conversation_listing_excludes_cron_sessions_without_breaking_pagination(
