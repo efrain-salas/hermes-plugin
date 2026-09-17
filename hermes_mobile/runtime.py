@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .activity import ActivityPublisher
 from .config import MobileConfig
 from .files.extraction import ExtractionError, extract_attachment
 from .hermes.action_mapper import ActionTracker, build_action
@@ -27,6 +28,7 @@ logger = logging.getLogger("hermes_mobile")
 
 NOTIFICATION_EXCERPT_MAX_CHARS = 240
 NOTIFICATION_CAPTURE_MAX_CHARS = 4096
+ACTIVITY_HEARTBEAT_SECONDS = 2.0
 
 SCHEDULED_TASK_INSTRUCTIONS = """Hermes Mobile tiene un hub para todas las tareas programadas.
 Cuando uses cronjob para crear o actualizar una tarea, usa deliver='local' salvo que el usuario
@@ -62,6 +64,9 @@ class MobileRuntime:
         self._stores: dict[str, ProfileStore] = {}
         self._quick_controls: dict[str, QuickRunControl] = {}
         self.boot_id = new_id("boot")
+        self.activity = ActivityPublisher(
+            config.plugin_root / "activity.json", boot_id=self.boot_id
+        )
         self.started = False
 
     def profile_home(self, profile: str) -> Path:
@@ -105,12 +110,22 @@ class MobileRuntime:
             await asyncio.to_thread(self.store, profile)
         await self.facade.start()
         self.started = True
+        await asyncio.to_thread(self.activity.write)
+        self.supervisor.create(self._publish_activity(), name="activity-publisher")
         if self.config.push.enabled:
             self.supervisor.create(self.push_worker.run(), name="push-outbox")
         self.supervisor.create(self._reconcile_runs(), name="run-reconciler")
 
+    async def _publish_activity(self) -> None:
+        """Refresh the host activity snapshot so staleness implies a dead writer."""
+        while True:
+            await asyncio.to_thread(self.activity.write)
+            await asyncio.sleep(ACTIVITY_HEARTBEAT_SECONDS)
+
     async def record_gateway_started(self, runner: object | None = None) -> None:
         """Persist a cold start or close the latest durable shutdown incident."""
+        self.activity.bind_gateway(runner)
+        await asyncio.to_thread(self.activity.write)
         now = iso()
         for profile in await asyncio.to_thread(self.control.profile_ids):
             store = self.store(profile)
@@ -275,11 +290,13 @@ class MobileRuntime:
 
     async def close(self) -> None:
         await self.supervisor.close()
+        await asyncio.to_thread(self.activity.reset)
         await self.push_worker.close()
         await self.facade.close()
         self.started = False
 
     def mirror_run(self, profile: str, public_run_id: str, hermes_run_id: str) -> None:
+        self.activity.begin(public_run_id, profile)
         self.supervisor.create(
             self._mirror_run(profile, public_run_id, hermes_run_id),
             name=f"mirror:{public_run_id}",
@@ -309,6 +326,7 @@ class MobileRuntime:
         """Start a lightweight in-process turn that still persists to the session."""
         control = QuickRunControl()
         self._quick_controls[public_run_id] = control
+        self.activity.begin(public_run_id, profile)
         self.supervisor.create(
             self._run_quick(
                 profile,
@@ -468,6 +486,8 @@ class MobileRuntime:
                 "Hermes run stream interrupted; REST reconciliation will continue",
                 exc_info=False,
             )
+        finally:
+            await asyncio.to_thread(self.activity.end, public_run_id)
 
     @classmethod
     def _content_text(cls, content: object) -> str:

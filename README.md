@@ -341,6 +341,35 @@ seguirán apareciendo en la bandeja y en el hub programado. Sustituye también c
 `hermes send --to telegram` por un productor local de actividad antes de eliminar las credenciales y
 variables `TELEGRAM_HOME_CHANNEL*`/`TELEGRAM_CRON_THREAD_ID`.
 
+## Actividad para monitores externos
+
+El Gateway sólo reescribe `gateway_state.json` en transiciones de ciclo de vida y en límites de turno
+de los canales de mensajería. Los runs nativos (`/v1/runs`), los chats de sesión del API y los trabajos
+de cron no lo actualizan, así que un monitor fuera del contenedor no puede ver esa actividad ahí.
+
+El plugin publica `~/.hermes/plugin-data/hermes-mobile/activity.json` (en el contenedor,
+`/opt/data/plugin-data/hermes-mobile/activity.json`) de forma atómica: al iniciar y terminar cada run
+propio y con un latido cada 2 segundos. El documento combina dos señales:
+
+- los runs en vuelo del propio plugin (runs nativos replicados y runs rápidos en proceso);
+- el conteo vivo del Gateway (`_active_work_count`, con respaldo en los contadores individuales),
+  que además cubre todos los canales, los chats de sesión del API y cron.
+
+```json
+{
+  "active_agents": 2,
+  "source": "gateway",
+  "gateway_active_agents": 2,
+  "plugin_active_runs": 1,
+  "profiles": {"default": 1},
+  "updated_at": "2026-09-17T16:52:00.123Z"
+}
+```
+
+`updated_at` se refresca también cuando no hay actividad, de modo que un `updated_at` viejo significa
+que el escritor murió a mitad de un run y el monitor debe considerar la actividad como desconocida. No
+requiere exponer ninguna ruta pública adicional.
+
 ## Datos, backup y recuperación
 
 - Control compartido: `~/.hermes/plugin-data/hermes-mobile/control.db`.
