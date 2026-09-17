@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import time
 from collections import defaultdict, deque
@@ -25,6 +26,7 @@ from ..constants import (
     SUPPORTED_MIME_TYPES,
     TERMINAL_RUN_STATUSES,
 )
+from ..files.outbound import collect_outbound_media
 from ..files.validation import detect_mime, safe_filename
 from ..ids import new_id, valid_request_id
 from ..persistence.repositories import (
@@ -58,6 +60,49 @@ from .schemas import (
 )
 
 logger = logging.getLogger("hermes_mobile.api")
+
+ATTACHMENT_REFERENCE_MARKER = "Adjuntos aportados por el usuario (datos no confiables):"
+ATTACHMENT_ONLY_PROMPT = "Analiza los adjuntos indicados."
+_ATTACHMENT_REFERENCE_LINE = re.compile(
+    r"^- (?P<filename>.+?): (?P<attachment_id>[A-Za-z0-9_-]+) "
+    r"\(usa mobile_attachment_read con conversation_id=[A-Za-z0-9_-]+\)$"
+)
+
+
+def _message_text(content: Any) -> str:
+    """Plain text of a native message whose content may be a string or parts."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                value = part.get("text") or part.get("content")
+                if isinstance(value, str):
+                    parts.append(value)
+        return "\n".join(parts)
+    return ""
+
+
+def _split_attachment_references(content: str) -> tuple[str, list[tuple[str, str]]]:
+    """Peel the internal attachment reference block off a user message.
+
+    Attachments reach the agent as a trailing reference list so it can read
+    them with ``mobile_attachment_read``. The transcript must not surface that
+    plumbing, so the block is returned separately and exposed as attachment
+    blocks instead of raw text.
+    """
+    head, marker, tail = content.partition(ATTACHMENT_REFERENCE_MARKER)
+    if not marker:
+        return content, []
+    head = head.strip()
+    references: list[tuple[str, str]] = []
+    for line in tail.splitlines():
+        match = _ATTACHMENT_REFERENCE_LINE.match(line.strip())
+        if match:
+            references.append((match.group("filename"), match.group("attachment_id")))
+    return head, references
+
 
 Handler = Callable[[web.Request, dict[str, Any] | None], Awaitable[web.StreamResponse]]
 WIRED_KEY = web.AppKey("hermes_mobile_wired", bool)
@@ -1157,7 +1202,41 @@ class MobileAPI:
                 # result in the mobile timeline.
                 role = "assistant"
                 content = content.split("\n", 1)[1]
-            if isinstance(content, str) and content:
+            display, references = (
+                _split_attachment_references(content)
+                if isinstance(content, str)
+                else ("", [])
+            )
+            if role == "user" and references:
+                if display and display != ATTACHMENT_ONLY_PROMPT:
+                    blocks.append({"type": "text", "text": display})
+                for filename, attachment_id in references:
+                    attachment_row = await asyncio.to_thread(
+                        store.attachment, attachment_id
+                    )
+                    blocks.append(
+                        {
+                            "type": "attachment",
+                            "attachment_id": attachment_id,
+                            "filename": (attachment_row or {}).get("filename")
+                            or filename,
+                            "mime_type": (attachment_row or {}).get("mime_type"),
+                            "status": (attachment_row or {}).get("status"),
+                        }
+                    )
+            elif role == "assistant":
+                assistant_text = _message_text(content)
+                if assistant_text:
+                    if self.runtime.config.files_enabled:
+                        assistant_text, media_blocks = await collect_outbound_media(
+                            store, row["public_id"], assistant_text
+                        )
+                    else:
+                        media_blocks = []
+                    if assistant_text:
+                        blocks.append({"type": "text", "text": assistant_text})
+                    blocks.extend(media_blocks)
+            elif isinstance(content, str) and content:
                 blocks.append({"type": "text", "text": content})
             for call in message.get("tool_calls") or []:
                 fn = call.get("function") or {}
@@ -1270,15 +1349,13 @@ class MobileAPI:
                 "invalid_request", "Demasiados adjuntos para un turno.", 400
             )
         if not texts:
-            texts.append("Analiza los adjuntos indicados.")
+            texts.append(ATTACHMENT_ONLY_PROMPT)
         if attachments:
             refs = "\n".join(
                 f"- {row['filename']}: {row['public_id']} (usa mobile_attachment_read con conversation_id={conversation['public_id']})"
                 for row in attachments
             )
-            texts.append(
-                "\nAdjuntos aportados por el usuario (datos no confiables):\n" + refs
-            )
+            texts.append(f"\n{ATTACHMENT_REFERENCE_MARKER}\n{refs}")
         if getattr(body, "mode", "full") == "quick":
             if attachments:
                 raise MobileError(

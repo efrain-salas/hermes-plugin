@@ -1209,6 +1209,147 @@ async def test_messages_mapping_filters_and_model_error(client, fake_facade, aut
     assert page_body["has_more"] is True and page_body["next_cursor"]
 
 
+async def test_messages_expose_attachment_blocks_without_reference_plumbing(
+    client, runtime, fake_facade, auth
+):
+    _, headers = auth
+    conversation = await _conversation(client, headers, "Attachments")
+    store = runtime.store("default")
+    original = store.files_root / "originals" / "photo" / "file"
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b"\x89PNG\r\n\x1a\n")
+    attachment = store.create_attachment(
+        {
+            "conversation_id": conversation["id"],
+            "client_attachment_id": "photo-1",
+            "filename": "foto.png",
+            "safe_filename": "foto.png",
+            "mime_type": "image/png",
+            "size": original.stat().st_size,
+            "sha256": "abc",
+            "storage_path": str(original),
+        }
+    )
+    session_id = store.conversation(conversation["id"])["hermes_session_id"]
+    reference = (
+        f"- foto.png: {attachment['public_id']} "
+        f"(usa mobile_attachment_read con conversation_id={conversation['id']})"
+    )
+    marker = "Adjuntos aportados por el usuario (datos no confiables):"
+    fake_facade.messages[("default", session_id)] = [
+        {
+            "id": "native-photo-text",
+            "role": "user",
+            "content": f"Mira esto\n\n\n{marker}\n{reference}",
+            "timestamp": 1_788_948_003.0,
+        },
+        {
+            "id": "native-photo-only",
+            "role": "user",
+            "content": f"Analiza los adjuntos indicados.\n\n\n{marker}\n{reference}",
+            "timestamp": 1_788_948_004.0,
+        },
+    ]
+    messages = await client.get(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}/messages",
+        headers=headers,
+    )
+    assert messages.status == 200, await messages.text()
+    body = await messages.json()
+    with_text = body["items"][0]["content"]
+    assert with_text[0] == {"type": "text", "text": "Mira esto"}
+    assert with_text[1] == {
+        "type": "attachment",
+        "attachment_id": attachment["public_id"],
+        "filename": "foto.png",
+        "mime_type": "image/png",
+        "status": "processing",
+    }
+    only_photo = body["items"][1]["content"]
+    assert [block["type"] for block in only_photo] == ["attachment"]
+    assert "mobile_attachment_read" not in json.dumps(body)
+
+
+async def test_assistant_media_becomes_downloadable_attachment_blocks(
+    client, runtime, fake_facade, auth, monkeypatch, tmp_path
+):
+    _, headers = auth
+    conversation = await _conversation(client, headers, "Assistant media")
+    store = runtime.store("default")
+    session_id = store.conversation(conversation["id"])["hermes_session_id"]
+    png = b"\x89PNG\r\n\x1a\n" + b"qrcode-body"
+    image_path = tmp_path / "codigo-qr.png"
+    image_path.write_bytes(png)
+    document_path = tmp_path / "informe.pdf"
+    document_path.write_bytes(b"%PDF-1.4 fake pdf")
+
+    calls: list[str] = []
+
+    async def downloader(url: str):
+        calls.append(url)
+        return png, "grafico.png", "image/png"
+
+    monkeypatch.setattr(
+        "hermes_mobile.files.outbound._download_remote", downloader
+    )
+    fake_facade.messages[("default", session_id)] = [
+        {
+            "id": "native-assistant-media",
+            "role": "assistant",
+            "content": (
+                f"Escanea este QR:\nMEDIA:{image_path}\n"
+                f"y el informe `MEDIA:{document_path}`\n"
+                "Además ![grafico](https://cdn.example.test/grafico.png)"
+            ),
+            "timestamp": 1_788_948_010.0,
+        }
+    ]
+
+    messages = await client.get(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}/messages",
+        headers=headers,
+    )
+    assert messages.status == 200, await messages.text()
+    body = await messages.json()
+    blocks = body["items"][0]["content"]
+    assert blocks[0]["type"] == "text"
+    assert "MEDIA:" not in blocks[0]["text"]
+    assert "https://cdn.example.test" not in blocks[0]["text"]
+    attachments = [block for block in blocks if block["type"] == "attachment"]
+    assert [block["filename"] for block in attachments] == [
+        "codigo-qr.png",
+        "informe.pdf",
+        "grafico.png",
+    ]
+    assert [block["mime_type"] for block in attachments] == [
+        "image/png",
+        "application/pdf",
+        "image/png",
+    ]
+    assert all(block["status"] == "ready" for block in attachments)
+    assert calls == ["https://cdn.example.test/grafico.png"]
+
+    content = await client.get(
+        f"/p/default/v1/mobile/attachments/{attachments[0]['attachment_id']}/content",
+        headers=headers,
+    )
+    assert content.status == 200
+    assert await content.read() == png
+
+    refreshed = await client.get(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}/messages",
+        headers=headers,
+    )
+    refreshed_attachments = [
+        block for block in (await refreshed.json())["items"][0]["content"]
+        if block["type"] == "attachment"
+    ]
+    assert [block["attachment_id"] for block in refreshed_attachments] == [
+        block["attachment_id"] for block in attachments
+    ]
+    assert len(store.list_attachments(conversation["id"], None, 10, 0)) == 3
+
+
 async def test_scheduled_task_hub_uses_native_cron_and_optional_conversation(
     client, runtime, fake_facade, auth, monkeypatch
 ):
