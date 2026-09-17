@@ -17,6 +17,7 @@ from .hermes.profile_preferences import NativeProfilePreferences
 from .hermes.quick_agent import NativeQuickAgent, QuickRunControl
 from .ids import new_id
 from .lifecycle import TaskSupervisor
+from .notifications.plaintext import plain_notification_text
 from .notifications.worker import PushWorker
 from .persistence.repositories import ControlStore, ProfileStore, iso, json_dump
 from .security.tokens import SecretBox, TokenManager
@@ -477,7 +478,7 @@ class MobileRuntime:
 
     @classmethod
     def _notification_excerpt(cls, content: object) -> str:
-        text = " ".join(cls._content_text(content).split())
+        text = plain_notification_text(cls._content_text(content))
         if len(text) <= NOTIFICATION_EXCERPT_MAX_CHARS:
             return text
         return text[: NOTIFICATION_EXCERPT_MAX_CHARS - 1].rstrip() + "…"

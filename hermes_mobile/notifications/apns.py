@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from ..config import APNsCredentials
+from .plaintext import plain_notification_text
 
 APNS_HOSTS = {
     "sandbox": "api.sandbox.push.apple.com",
@@ -108,8 +109,8 @@ def build_payload(
     message: dict[str, Any], max_bytes: int = MAX_PAYLOAD_BYTES
 ) -> bytes:
     """Translate the internal notification into an ``aps``-shaped payload."""
-    title = str(message.get("title") or "")
-    body = str(message.get("body") or "")
+    title = plain_notification_text(message.get("title"))
+    body = plain_notification_text(message.get("body"))
     custom: dict[str, Any] = {}
     data = message.get("data")
     if isinstance(data, dict):

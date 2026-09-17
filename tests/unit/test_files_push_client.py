@@ -36,6 +36,10 @@ from hermes_mobile.notifications.apns import (
     send_apns,
 )
 from hermes_mobile.notifications.worker import PushWorker
+from hermes_mobile.notifications.plaintext import (
+    markdown_to_text,
+    plain_notification_text,
+)
 from hermes_mobile.persistence.repositories import (
     ControlStore,
     ProfileStore,
@@ -292,6 +296,31 @@ def test_apns_response_classification():
     assert expired.apns_id == "apns-9"
     assert isinstance(classify_response(400, "BadDeviceToken"), APNsPermanentError)
     assert isinstance(classify_response(403, "BadCertificate"), APNsPermanentError)
+
+
+def test_notification_text_strips_markdown():
+    assert plain_notification_text("Hola **mundo** en *cursiva*") == (
+        "Hola mundo en cursiva"
+    )
+    assert plain_notification_text("# Título\n\n- uno\n- dos") == (
+        "Título uno dos"
+    )
+    assert markdown_to_text("`code` y [enlace](https://x.dev) y ![img](a.png)") == (
+        "code y enlace y img"
+    )
+    assert markdown_to_text("~~tachado~~ y __fuerte__ y _énfasis_") == (
+        "tachado y fuerte y énfasis"
+    )
+    assert markdown_to_text("2 * 3 * 4 queda igual") == "2 * 3 * 4 queda igual"
+    assert plain_notification_text("```python\nprint('x')\n```") == "print('x')"
+    assert plain_notification_text(None) == ""
+
+
+def test_apns_payload_strips_markdown():
+    decoded = json.loads(
+        build_payload({"title": "**Listo**", "body": "- Uno\n- *Dos*", "data": {}})
+    )
+    assert decoded["aps"]["alert"] == {"title": "Listo", "body": "Uno Dos"}
 
 
 def test_create_apns_client_enables_http2(monkeypatch):
