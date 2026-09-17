@@ -99,7 +99,18 @@ class FakeFacade:
 
     async def get_messages(self, profile, session_id, **params):
         self._guard()
-        return {"data": self.messages[(profile, session_id)]}
+        rows = self.messages[(profile, session_id)]
+        limit = params.get("limit")
+        offset = int(params.get("offset", 0) or 0)
+        latest = params.get("order") == "latest"
+        # Mirror the upstream contract: ``latest`` pages back from the newest
+        # but still returns the window in chronological order.
+        window = rows[::-1][offset:] if latest else rows[offset:]
+        if limit is not None and int(limit) >= 0:
+            window = window[: int(limit)]
+        if latest:
+            window = window[::-1]
+        return {"data": window}
 
     async def fork_conversation(self, profile, session_id, body):
         source = self.sessions[profile][session_id]

@@ -21,11 +21,12 @@ def test_generated_contract_is_current_and_complete():
         for path in document["paths"].values()
         for operation in path.values()
     }
-    assert len(operations) == 52
+    assert len(operations) == 53
     assert {
         "pair",
         "createRun",
         "streamRunEvents",
+        "getRunActivity",
         "answerApproval",
         "uploadAttachment",
         "sync",

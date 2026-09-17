@@ -61,6 +61,7 @@ ENDPOINTS = [
     ),
     ("get", "/p/{profile}/v1/mobile/runs/{run_id}", "getRun"),
     ("get", "/p/{profile}/v1/mobile/runs/{run_id}/events", "streamRunEvents"),
+    ("get", "/p/{profile}/v1/mobile/runs/{run_id}/activity", "getRunActivity"),
     ("post", "/p/{profile}/v1/mobile/runs/{run_id}/cancel", "cancelRun"),
     ("post", "/p/{profile}/v1/mobile/runs/{run_id}/steer", "steerRun"),
     (

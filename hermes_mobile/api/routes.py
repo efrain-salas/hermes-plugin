@@ -28,6 +28,7 @@ from ..constants import (
 )
 from ..files.outbound import collect_outbound_media
 from ..files.validation import detect_mime, safe_filename
+from ..hermes.action_mapper import attach_transcript_inputs, merge_run_actions
 from ..ids import new_id, valid_request_id
 from ..persistence.repositories import (
     InvalidPairing,
@@ -192,6 +193,12 @@ class MobileAPI:
             ),
             ("GET", "/runs/{run_id}", self.get_run, "conversations:read"),
             ("GET", "/runs/{run_id}/events", self.run_events, "conversations:read"),
+            (
+                "GET",
+                "/runs/{run_id}/activity",
+                self.run_activity,
+                "conversations:read",
+            ),
             ("POST", "/runs/{run_id}/cancel", self.cancel_run, "runs:write"),
             ("POST", "/runs/{run_id}/steer", self.steer_run, "runs:write"),
             (
@@ -874,6 +881,54 @@ class MobileAPI:
             return None
         return iso(max(parsed))
 
+    @staticmethod
+    def _tool_input(raw: Any) -> dict[str, Any]:
+        """Normalize a native ``tool_calls[].function.arguments`` value for clients.
+
+        Hermes stores arguments as a JSON string, but tools executed in-process
+        may already hand over a mapping; clients always receive an object.
+        """
+        if raw is None:
+            return {}
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str):
+            text = raw.strip()
+            if not text:
+                return {}
+            try:
+                parsed = json.loads(text)
+            except ValueError:
+                return {"raw": text[:500]}
+            return parsed if isinstance(parsed, dict) else {"value": parsed}
+        return {"value": raw}
+
+    @classmethod
+    def _run_windows(cls, runs: list[dict[str, Any]]) -> list[tuple[datetime, str]]:
+        """Ordered ``(created_at, run_id)`` pairs used to attribute messages to runs.
+
+        Hermes stores its own native message ids, so the plugin cannot match a
+        transcript row to a run by id; the run active at each timestamp is the
+        run whose creation is the latest one at or before it.
+        """
+        return [
+            (moment, candidate["public_id"])
+            for candidate in runs
+            if (moment := cls._time_value(candidate.get("created_at"))) is not None
+        ]
+
+    @staticmethod
+    def _run_id_for(windows: list[tuple[datetime, str]], moment: datetime | None) -> str | None:
+        if moment is None:
+            return None
+        chosen = None
+        for created, candidate_id in windows:
+            if created <= moment:
+                chosen = candidate_id
+            else:
+                break
+        return chosen
+
     async def conversations(
         self, request: web.Request, _subject: dict | None
     ) -> web.Response:
@@ -1167,26 +1222,39 @@ class MobileAPI:
         self, request: web.Request, _subject: dict | None
     ) -> web.Response:
         profile, store, row = await self._mapped_conversation(request)
-        try:
-            limit = min(100, max(1, int(request.query.get("limit", 50))))
-        except ValueError as exc:
-            raise MobileError("invalid_request", "limit no válido.", 400) from exc
+        limit, offset = self._page_params(request, default=50)
         native = await self.runtime.facade.get_messages(
-            profile, row["hermes_session_id"], limit=limit, order="latest"
+            profile,
+            row["hermes_session_id"],
+            limit=limit + 1,
+            offset=offset,
+            order="latest",
         )
+        runs = await asyncio.to_thread(store.runs_for_conversation, row["public_id"])
+        run_windows = self._run_windows(runs)
+
+        data = native.get("data", [])
+        has_more = len(data) > limit
+        if has_more:
+            # ``order=latest`` returns the window chronologically, so the extra
+            # row we fetched to detect more pages is the oldest of the window.
+            data = data[1:]
+
         items = []
-        for index, message in enumerate(native.get("data", [])):
+        for index, message in enumerate(data):
             hermes_id = str(
                 message.get("id")
                 or f"{row['hermes_session_id']}:{index}:{message.get('timestamp')}"
             )
+            created_at = self._as_time(message.get("timestamp")) or iso()
+            run_id = self._run_id_for(run_windows, self._time_value(created_at))
             public_id = await asyncio.to_thread(
                 store.ensure_message,
                 row["public_id"],
                 hermes_id,
                 str(message.get("role") or "assistant"),
-                self._as_time(message.get("timestamp")) or iso(),
-                None,
+                created_at,
+                run_id,
             )
             blocks: list[dict[str, Any]] = []
             content = message.get("content")
@@ -1246,7 +1314,7 @@ class MobileAPI:
                         "tool_call_id": call.get("id"),
                         "name": fn.get("name"),
                         "status": "completed",
-                        "input": fn.get("arguments") or {},
+                        "input": self._tool_input(fn.get("arguments")),
                         "output_preview": None,
                     }
                 )
@@ -1254,7 +1322,7 @@ class MobileAPI:
                 {
                     "id": public_id,
                     "conversation_id": row["public_id"],
-                    "run_id": None,
+                    "run_id": run_id,
                     "role": role,
                     "status": "completed",
                     "content": blocks,
@@ -1273,7 +1341,11 @@ class MobileAPI:
             store.update_conversation, row["public_id"], {"read_at": iso()}
         )
         return self._json(
-            {"items": items, "next_cursor": None, "has_more": len(items) >= limit}
+            {
+                "items": items,
+                "next_cursor": self._cursor(offset + limit) if has_more else None,
+                "has_more": has_more,
+            }
         )
 
     async def create_run(
@@ -1564,6 +1636,81 @@ class MobileAPI:
     ) -> web.Response:
         _profile, store, run = await self._mapped_run(request)
         return self._json(store.run_resource(run))
+
+    async def run_activity(
+        self, request: web.Request, _subject: dict | None
+    ) -> web.Response:
+        """Durable, client-ready activity for a run.
+
+        Events drive the timeline (kind/status/preview); the native transcript
+        supplies the full arguments and output preview that the live stream omits.
+        """
+        profile, store, run = await self._mapped_run(request)
+        cursor = request.query.get("cursor") or None
+        events, _reset = await asyncio.to_thread(
+            store.events_after, run["public_id"], cursor
+        )
+        actions = merge_run_actions(events)
+        conversation = await asyncio.to_thread(
+            store.conversation, run["conversation_id"]
+        )
+        if conversation:
+            await self._attach_activity_transcript(
+                profile, store, conversation, run["public_id"], actions
+            )
+        return self._json(
+            {
+                "run_id": run["public_id"],
+                "conversation_id": run["conversation_id"],
+                "status": run.get("status"),
+                "mode": run.get("mode") or "full",
+                "started_at": run.get("started_at"),
+                "completed_at": run.get("completed_at"),
+                "items": actions,
+                "next_cursor": None,
+            }
+        )
+
+    async def _attach_activity_transcript(
+        self,
+        profile: str,
+        store: Any,
+        conversation: dict[str, Any],
+        run_id: str,
+        actions: list[dict[str, Any]],
+    ) -> None:
+        if not actions:
+            return
+        if not any(
+            action.get("kind") not in {"subagent", "approval"} for action in actions
+        ):
+            return
+        try:
+            native = await self.runtime.facade.get_messages(
+                profile, conversation["hermes_session_id"], limit=100, order="latest"
+            )
+        except Exception:
+            logger.debug("Activity transcript unavailable", exc_info=True)
+            return
+        runs = await asyncio.to_thread(
+            store.runs_for_conversation, conversation["public_id"]
+        )
+        windows = self._run_windows(runs)
+        blocks: list[dict[str, Any]] = []
+        for message in native.get("data", []):
+            created_at = self._as_time(message.get("timestamp")) or iso()
+            if self._run_id_for(windows, self._time_value(created_at)) != run_id:
+                continue
+            for call in message.get("tool_calls") or []:
+                fn = call.get("function") or {}
+                blocks.append(
+                    {
+                        "name": fn.get("name"),
+                        "input": self._tool_input(fn.get("arguments")) or None,
+                        "output_preview": None,
+                    }
+                )
+        attach_transcript_inputs(actions, blocks)
 
     async def run_events(
         self, request: web.Request, subject: dict | None

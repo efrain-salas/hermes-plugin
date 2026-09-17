@@ -1020,10 +1020,15 @@ class ProfileStore(SQLiteStore):
     ) -> str:
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT public_id FROM message_map WHERE conversation_id=? AND hermes_message_id=?",
+                "SELECT public_id,run_id FROM message_map WHERE conversation_id=? AND hermes_message_id=?",
                 (conversation_id, hermes_id),
             ).fetchone()
             if row:
+                if run_id and row["run_id"] != run_id:
+                    conn.execute(
+                        "UPDATE message_map SET run_id=? WHERE public_id=?",
+                        (run_id, row["public_id"]),
+                    )
                 return str(row["public_id"])
             public_id = new_id("msg")
             conn.execute(
@@ -1584,6 +1589,16 @@ class ProfileStore(SQLiteStore):
                 "SELECT * FROM runs WHERE public_id=?", (public_id,)
             ).fetchone()
             return dict(row) if row else None
+
+    def runs_for_conversation(self, conversation_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            return [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM runs WHERE conversation_id=? ORDER BY created_at",
+                    (conversation_id,),
+                )
+            ]
 
     def nonterminal_runs(self) -> list[dict[str, Any]]:
         with self.connect() as conn:

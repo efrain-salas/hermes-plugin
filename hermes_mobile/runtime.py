@@ -10,6 +10,7 @@ from typing import Any
 
 from .config import MobileConfig
 from .files.extraction import ExtractionError, extract_attachment
+from .hermes.action_mapper import ActionTracker, build_action
 from .hermes.api_client import HermesAPIClient
 from .hermes.cron_reader import NativeCronReader
 from .hermes.event_mapper import map_event
@@ -374,6 +375,7 @@ class MobileRuntime:
         """
         store = self.store(profile)
         response_text = ""
+        tracker = ActionTracker()
         try:
             async for source in events:
                 mapped = map_event(source)
@@ -418,6 +420,9 @@ class MobileRuntime:
                         data["approval_id"] = await asyncio.to_thread(
                             store.ensure_approval, public_run_id, request_id
                         )
+                action = build_action(event_type, data, tracker)
+                if action is not None:
+                    data["action"] = action
                 await asyncio.to_thread(
                     store.append_event, public_run_id, event_type, data
                 )

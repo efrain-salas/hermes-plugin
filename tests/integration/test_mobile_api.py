@@ -826,6 +826,10 @@ async def test_attachment_run_sse_sync_models_and_toolsets(
     assert "event: reasoning.available" in events
     assert "private chain" not in events
     assert "event: run.completed" in events
+    # Every action event carries the normalized, client-facing ``action`` payload.
+    assert '"action":{"detail":null,"id":"act_' in events
+    assert '"kind":"tool","schema":1,"status":"started","tool":"calculator"' in events
+    assert '"kind":"subagent","schema":1,"status":"started","tool":"delegate_task"' in events
 
     models = await client.get("/p/default/v1/mobile/models", headers=headers)
     assert await models.json() == {
@@ -1207,6 +1211,63 @@ async def test_messages_mapping_filters_and_model_error(client, fake_facade, aut
     )
     page_body = await page.json()
     assert page_body["has_more"] is True and page_body["next_cursor"]
+
+
+async def test_messages_pagination_returns_opaque_cursor(client, fake_facade, auth):
+    _, headers = auth
+    conversation = await _conversation(client, headers, "Long")
+    session_id = next(
+        key
+        for key, value in fake_facade.sessions["default"].items()
+        if value["title"] == "Long"
+    )
+    fake_facade.messages[("default", session_id)] = [
+        {
+            "id": f"native-{index}",
+            "role": "user" if index % 2 == 0 else "assistant",
+            "content": f"Message {index}",
+            "timestamp": 1_788_948_000.0 + index,
+        }
+        for index in range(5)
+    ]
+    path = f"/p/default/v1/mobile/conversations/{conversation['id']}/messages"
+
+    first = await client.get(path, headers=headers, params={"limit": "2"})
+    assert first.status == 200, await first.text()
+    first_body = await first.json()
+    assert first_body["has_more"] is True
+    assert first_body["next_cursor"]
+    assert [item["content"][0]["text"] for item in first_body["items"]] == [
+        "Message 3",
+        "Message 4",
+    ]
+
+    second = await client.get(
+        path,
+        headers=headers,
+        params={"limit": "2", "cursor": first_body["next_cursor"]},
+    )
+    assert second.status == 200, await second.text()
+    second_body = await second.json()
+    assert second_body["has_more"] is True
+    assert second_body["next_cursor"]
+    assert [item["content"][0]["text"] for item in second_body["items"]] == [
+        "Message 1",
+        "Message 2",
+    ]
+
+    third = await client.get(
+        path,
+        headers=headers,
+        params={"limit": "2", "cursor": second_body["next_cursor"]},
+    )
+    assert third.status == 200, await third.text()
+    third_body = await third.json()
+    assert third_body["has_more"] is False
+    assert third_body["next_cursor"] is None
+    assert [item["content"][0]["text"] for item in third_body["items"]] == [
+        "Message 0"
+    ]
 
 
 async def test_messages_expose_attachment_blocks_without_reference_plumbing(
@@ -1721,3 +1782,70 @@ async def test_reconcile_fails_orphaned_quick_runs(runtime):
     assert store.run(orphan["public_id"])["status"] == "failed"
     assert store.run(orphan["public_id"])["error_code"] == "quick_orphaned"
     assert store.run(live["public_id"])["status"] == "queued"
+
+
+async def test_messages_and_activity_expose_run_association(
+    client, fake_facade, auth
+):
+    _, headers = auth
+    conversation = await _conversation(client, headers, "Activity")
+    session_id = fake_facade.sessions["default"][
+        next(
+            key
+            for key, value in fake_facade.sessions["default"].items()
+            if value["title"] == "Activity"
+        )
+    ]["id"]
+    started = await client.post(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}/runs",
+        headers={**headers, "Idempotency-Key": "activity-run"},
+        json={
+            "client_message_id": "activity-message",
+            "input": [{"type": "text", "text": "Search"}],
+        },
+    )
+    assert started.status == 202, await started.text()
+    run_id = (await started.json())["run_id"]
+    await _wait_for_run(client, headers, run_id)
+
+    # A transcript row that belongs to the run: its timestamp is after the run
+    # was created, and it keeps the full tool arguments the stream omits.
+    fake_facade.messages[("default", session_id)] = [
+        {
+            "id": "native-activity",
+            "role": "assistant",
+            "content": "Done",
+            "timestamp": 4_000_000_000.0,
+            "token_count": 2,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "function": {
+                        "name": "calculator",
+                        "arguments": '{"x": 7}',
+                    },
+                }
+            ],
+        }
+    ]
+
+    messages = await client.get(
+        f"/p/default/v1/mobile/conversations/{conversation['id']}/messages",
+        headers=headers,
+    )
+    body = await messages.json()
+    assert body["items"][0]["run_id"] == run_id
+    assert body["items"][0]["content"][1]["input"] == {"x": 7}
+
+    activity = await client.get(
+        f"/p/default/v1/mobile/runs/{run_id}/activity", headers=headers
+    )
+    assert activity.status == 200, await activity.text()
+    detail = await activity.json()
+    assert detail["run_id"] == run_id
+    assert detail["conversation_id"] == conversation["id"]
+    tools = [item for item in detail["items"] if item.get("tool") == "calculator"]
+    assert tools and tools[0]["status"] == "started"
+    assert tools[0]["kind"] == "tool"
+    assert tools[0]["input"] == {"x": 7}
+
